@@ -1,0 +1,7 @@
+build/
+.cache/
+*.ppm
+dep/
+data/
+finalProj
+Makefile
