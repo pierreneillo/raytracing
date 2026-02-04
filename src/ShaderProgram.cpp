@@ -1,5 +1,6 @@
 #include "ShaderProgram.hpp"
 
+#include <GL/glext.h>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -11,6 +12,7 @@
 #include "Mesh.hpp"
 #include "Scene.hpp"
 #include "constants.hpp"
+#include "glad/glad.h"
 
 // Create a GPU program i.e., a graphics pipeline
 ShaderProgram::ShaderProgram() : _id(glCreateProgram()) {}
@@ -118,10 +120,13 @@ GLuint RayTracer::genComputeTextureImage(GLuint w, GLuint h) {
   glBindTexture(GL_TEXTURE_2D, tex.id);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  // glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+  //                 GL_LINEAR_MIPMAP_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, NULL);
-  glGenerateMipmap(GL_TEXTURE_2D);
+  // glGenerateMipmap(GL_TEXTURE_2D);
   glBindTexture(GL_TEXTURE_2D, 0);
   return tex.id;
 }
@@ -131,19 +136,29 @@ GLuint RayTracer::genSSBOs(const Scene scene) {
     glm::vec4 p;
     glm::vec4 n;
   };
+  struct RTMat {
+    glm::vec4 ambient;
+    glm::vec4 diffuse;
+    glm::vec4 specular;
+    glm::vec4 st;
+  };
   // We have to bind the 6 SSBOs, but first tightly pack the data
   std::vector<RTVertex> vertexBuffer = {};
   std::vector<unsigned int> triangleBuffer = {};
   std::vector<int> meshBuffer = {};
-  std::vector<glm::vec4> materialBuffer = {};
-  std::vector<int> objectBuffer = {};
+  std::vector<RTMat> materialBuffer = {};
+  std::vector<glm::ivec2> objectBuffer = {};
   std::vector<glm::vec4> lightBuffer;
+  std::vector<AABB> AABBBuffer = {};
+  std::vector<unsigned int> BVHBuffer = {};
+
   for (size_t i = 0; i < scene.objects.size(); i++) {
     const auto &obj = scene.objects[i];
     // 1 : Vertices
     std::vector<glm::vec3> vertices = obj->mesh->get_positions();
     std::vector<glm::vec3> normals = obj->mesh->get_normals();
     meshBuffer.push_back(vertices.size()); // nVertices
+    // We compute vStart to be able to shift triangles indexes
     unsigned int vStart = vertexBuffer.size();
     meshBuffer.push_back(vStart); // vStart
     for (size_t i = 0; i < vertices.size(); i++) {
@@ -153,26 +168,32 @@ GLuint RayTracer::genSSBOs(const Scene scene) {
     }
     // 2 : Triangles
     std::vector<unsigned int> triangles = obj->mesh->get_triangles();
-    meshBuffer.push_back(triangles.size());          // nTriangles
+    meshBuffer.push_back(triangles.size() / 3);      // nTriangles
     meshBuffer.push_back(triangleBuffer.size() / 3); // tStart
     for (auto &idx : triangles) {
       triangleBuffer.push_back(idx + vStart);
     }
+    // 7 : Bounding boxes
+    AABBBuffer.insert(AABBBuffer.end(), obj->mesh->get_BB().begin(),
+                      obj->mesh->get_BB().end());
+    // 8 : BVH
+    BVHBuffer.insert(BVHBuffer.end(), obj->mesh->get_BVH().begin(),
+                     obj->mesh->get_BVH().end());
     // 3 : Meshes
     // Done above
     // 4 : Materials
     std::shared_ptr<PhongMaterial> pmat =
         std::dynamic_pointer_cast<PhongMaterial>(obj->mat);
     if (pmat) {
-      materialBuffer.push_back(glm::vec4(pmat->ambientColor, pmat->kA));
-      materialBuffer.push_back(glm::vec4(pmat->specularColor, pmat->kS));
-      materialBuffer.push_back(glm::vec4(pmat->diffuseColor, pmat->kD));
-      materialBuffer.push_back(
-          glm::vec4(pmat->shininess, PHONG_MATERIAL, 0, 0));
+      materialBuffer.push_back({
+          glm::vec4(pmat->ambientColor, pmat->kA),
+          glm::vec4(pmat->diffuseColor, pmat->kD),
+          glm::vec4(pmat->specularColor, pmat->kS),
+          glm::vec4(pmat->shininess, PHONG_MATERIAL, 0, 0),
+      });
     } else {
-      materialBuffer.insert(materialBuffer.end(),
-                            {glm::vec4(0.), glm::vec4(0.), glm::vec4(0.),
-                             glm::vec4(0., UNDEFINED_MATERIAL, 0., 0.)});
+      materialBuffer.push_back({glm::vec4(0.), glm::vec4(0.), glm::vec4(0.),
+                                glm::vec4(0.0f, UNDEFINED_MATERIAL, 0, 0)});
     }
     // 5 : Objects
     objectBuffer.insert(objectBuffer.end(), {(int)i, (int)i});
@@ -183,43 +204,25 @@ GLuint RayTracer::genSSBOs(const Scene scene) {
     lightBuffer.push_back(glm::vec4(light.color, light.isActive ? 1. : 0.));
   }
   // Create and bind SSBOs
-  GLuint SSBOs[6];
-  glGenBuffers(6, SSBOs);
+  GLuint SSBOs[8];
+  glGenBuffers(8, SSBOs);
   createBindSSBO(SSBOs[0], vertexBuffer, 1);
   createBindSSBO(SSBOs[1], triangleBuffer, 2);
   createBindSSBO(SSBOs[2], meshBuffer, 3);
   createBindSSBO(SSBOs[3], materialBuffer, 4);
   createBindSSBO(SSBOs[4], objectBuffer, 5);
   createBindSSBO(SSBOs[5], lightBuffer, 6);
+  createBindSSBO(SSBOs[6], AABBBuffer, 7);
+  createBindSSBO(SSBOs[7], BVHBuffer, 8);
 
   // Setup uniforms accordingly
   use();
   set("nLights", (int)scene.lights.size());
   set("nTriangles", (int)triangleBuffer.size() / 3);
+  set("nObjects", (int)scene.objects.size());
   std::cout << "Number of triangles : " << triangleBuffer.size() / 3
             << std::endl;
   stop();
-
-  // Debug: read back first vertex/index from GPU buffers
-  GLint vbo = 0;
-  GLint ibo = 0;
-  glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 1, &vbo);
-  glGetIntegeri_v(GL_SHADER_STORAGE_BUFFER_BINDING, 2, &ibo);
-  if (vbo != 0) {
-    RTVertex firstV{};
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, vbo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(RTVertex), &firstV);
-    std::cout << "SSBO[vertices] first p = (" << firstV.p.x << ", "
-              << firstV.p.y << ", " << firstV.p.z << ", " << firstV.p.w << ")"
-              << std::endl;
-  }
-  if (ibo != 0) {
-    unsigned int firstIdx[3] = {0, 0, 0};
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, ibo);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(firstIdx), firstIdx);
-    std::cout << "SSBO[indices] first = (" << firstIdx[0] << ", " << firstIdx[1]
-              << ", " << firstIdx[2] << ")" << std::endl;
-  }
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -266,7 +269,7 @@ void ShaderProgram::dispatchCompute(int access) {
     {
       glBindImageTexture(0, tex.id, 0, GL_FALSE, 0, access, GL_RGBA32F);
       {
-        glDispatchCompute(tex.w / 16, tex.h / 16, 1);
+        glDispatchCompute((tex.w + 15) / 16, (tex.h + 15) / 16, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
                         GL_TEXTURE_FETCH_BARRIER_BIT);
       }

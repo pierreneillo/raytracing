@@ -65,6 +65,12 @@ std::vector<std::shared_ptr<Mesh>> meshes = {};
 GLFWwindow *g_window = nullptr;
 int g_windowWidth = 1024;
 int g_windowHeight = 768;
+int texture_upscale = 1;
+int texture_downscale = 4;
+
+int textureWidth = g_windowWidth * texture_upscale / texture_downscale;
+
+int textureHeight = g_windowHeight * texture_upscale / texture_downscale;
 
 // pointer to the current camera model
 std::shared_ptr<Camera> g_cam;
@@ -78,7 +84,7 @@ std::shared_ptr<Object> screenQuad;
 
 // camera control variables
 // to update based on the mesh size, so that navigation runs at scale
-float g_meshScale = 1.0;
+float g_meshScale = 2.0;
 bool g_rotatingP = false;
 bool g_panningP = false;
 bool g_zoomingP = false;
@@ -486,7 +492,7 @@ void initScene(const std::string &meshFilename) {
   g_scene.objects[0]->mesh->computeBoundingSphere(&meshCenter, &meshRadius);
   g_scene.scene_center = meshCenter;
   g_scene.scene_radius = meshRadius;
-  g_meshScale = g_scene.scene_radius;
+  g_meshScale = g_scene.scene_radius / 2.;
   g_cam->setPosition(g_scene.scene_center +
                      glm::vec3(0.0, 0.0, 3.0 * g_meshScale));
   g_cam->setNear(g_meshScale / 100.f);
@@ -522,7 +528,11 @@ void render() {
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, rayTracer->tex_id());
   texturePrinterShader->set("screenTexture", 0);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
   screenQuad->render(texturePrinterShader);
+  glEnable(GL_DEPTH_TEST);
+  glEnable(GL_CULL_FACE);
 }
 
 // Update any accessible variable based on the current time
@@ -604,9 +614,9 @@ int main(int argc, char **argv) {
   // Your initialization code (user interface, OpenGL states, scene with
   // geometry, material, lights, etc)
   init(argc == 1 ? DEFAULT_MESH_FILENAME : argv[1]);
-  rayTracer->genComputeTextureImage(g_windowWidth, g_windowHeight);
+  rayTracer->genComputeTextureImage(textureWidth, textureHeight);
   render();
-  saveTextureToPPM(rayTracer->tex_id(), g_windowWidth, g_windowHeight,
+  saveTextureToPPM(rayTracer->tex_id(), textureWidth, textureHeight,
                    "output.ppm");
   while (!glfwWindowShouldClose(g_window)) {
     update(static_cast<float>(glfwGetTime()));
