@@ -8,6 +8,8 @@ void APIENTRY debugMessageCallback(GLenum source, GLenum type, GLuint id,
                                    GLenum severity, GLsizei length,
                                    const GLchar *message,
                                    const void *userParam) {
+  if (id == 131185)
+    return;
   std::string sourceString("Unknown");
   if (source == GL_DEBUG_SOURCE_API)
     sourceString = "API";

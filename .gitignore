@@ -5,3 +5,7 @@ dep/
 data/
 finalProj
 Makefile
+CMakeCache.txt
+CMakeFiles
+cmake_install.cmake
+compile_commands.json
