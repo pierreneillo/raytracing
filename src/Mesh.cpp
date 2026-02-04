@@ -1,9 +1,22 @@
 #include "Mesh.hpp"
 
+#include <algorithm>
 #include <fstream>
+#include <iostream>
 
+#include "glad/glad.h"
 #include "glm/fwd.hpp"
 #include "stb_image.h"
+
+glm::vec3 cmin(glm::vec3 a, glm::vec3 b) {
+  // Component-wise minimum
+  return glm::vec3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
+}
+
+glm::vec3 cmax(glm::vec3 a, glm::vec3 b) {
+  // Component-wise maximum
+  return glm::vec3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
+}
 
 Mesh::~Mesh() {
   if (m_posVbo)
@@ -14,125 +27,152 @@ Mesh::~Mesh() {
     glDeleteBuffers(1, &m_texCoordVbo);
   if (m_ibo)
     glDeleteBuffers(1, &m_ibo);
+  if (m_bvhbo)
+    glDeleteBuffers(1, &m_bvhbo);
 };
 
-void Mesh::init() { // should properly set up the geometry buffer
+void Mesh::init(GLuint vao) {
+  // should properly set up the geometry buffer
   // The creation of a vertex array is handled by the Object instance related to
-  // this Mesh instance. We simply connect the vbos and ibo to the open vao
+  // this Mesh instance. We simply connect the vbos and ibo to the given vao
   // Generate a GPU buffer to store the positions of the vertices
-  if (m_posVbo != 0) {
-    // Buffers are already set, we need to rebuild all the bindings though
-#ifdef _MY_OPENGL_IS_33_
-    glBindBuffer(GL_ARRAY_BUFFER, m_posVbo);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
-    glEnableVertexAttribArray(0);
+  // We use the 4.5 DSA to prevent all confusion
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_normalVbo);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
-    glEnableVertexAttribArray(2);
+  // ###################
+  // # Buffer creation #
+  // ###################
 
-    if (m_texCoordVbo != 0) {
-      glBindBuffer(GL_ARRAY_BUFFER, m_texCoordVbo);
-      glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), 0);
-      glEnableVertexAttribArray(3);
-    }
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo);
-#else
-    glBindBuffer(GL_ARRAY_BUFFER, m_posVbo);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
-    glEnableVertexAttribArray(0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, m_normalVbo);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
-    glEnableVertexAttribArray(2);
-
-    if (m_texCoordVbo != 0) {
-      glBindBuffer(GL_ARRAY_BUFFER, m_texCoordVbo);
-      glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), 0);
-      glEnableVertexAttribArray(3);
-    }
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo);
-#endif
-    return;
-  }
-  size_t vertexBufferSize =
-      sizeof(glm::vec3) *
-      this->m_vertexPositions
-          .size(); // Gather the size of the buffer from the CPU-side vector
-#ifdef _MY_OPENGL_IS_33_
-  glGenBuffers(1, &this->m_posVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_posVbo);
-  glBufferData(GL_ARRAY_BUFFER, vertexBufferSize,
-               this->m_vertexPositions.data(), GL_STATIC_DRAW);
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
-  glEnableVertexAttribArray(0);
-#else
-  glCreateBuffers(1, &this->m_posVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_posVbo);
-  glNamedBufferStorage(this->m_posVbo, vertexBufferSize,
-                       this->m_vertexPositions.data(), GL_DYNAMIC_STORAGE_BIT);
+  glCreateBuffers(1, &m_posVbo);
+  glNamedBufferData(m_posVbo, sizeof(glm::vec3) * m_vertexPositions.size(),
+                    m_vertexPositions.data(), GL_STATIC_DRAW);
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
   glEnableVertexAttribArray(0);
-#endif
 
-#ifdef _MY_OPENGL_IS_33_
-  glGenBuffers(1, &this->m_normalVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_normalVbo);
-  glBufferData(GL_ARRAY_BUFFER, vertexBufferSize, this->m_vertexNormals.data(),
-               GL_STATIC_DRAW);
-  glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
-  glEnableVertexAttribArray(2);
-#else
-  glCreateBuffers(1, &this->m_normalVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_normalVbo);
+  glCreateBuffers(1, &m_normalVbo);
+  glBindBuffer(GL_ARRAY_BUFFER, m_normalVbo);
   glNamedBufferStorage(
-      this->m_normalVbo, vertexBufferSize, this->m_vertexNormals.data(),
+      m_normalVbo, vertexBufferSize, m_vertexNormals.data(),
       GL_DYNAMIC_STORAGE_BIT); // Create a data storage on the GPU and fill it
                                // from a CPU array
   glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
   glEnableVertexAttribArray(2);
-#endif
 
   // Upload texcoords with correct size (vec2)
-  size_t texBufferSize = sizeof(glm::vec2) * this->m_vertexTexCoords.size();
+  size_t texBufferSize = sizeof(glm::vec2) * m_vertexTexCoords.size();
   if (texBufferSize > 0) {
-#ifdef _MY_OPENGL_IS_33_
-  glGenBuffers(1, &this->m_texCoordVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_texCoordVbo);
-  glBufferData(GL_ARRAY_BUFFER, texBufferSize, this->m_vertexTexCoords.data(),
-               GL_STATIC_DRAW);
-  glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), 0);
-  glEnableVertexAttribArray(3);
-#else
-  glCreateBuffers(1, &this->m_texCoordVbo);
-  glBindBuffer(GL_ARRAY_BUFFER, this->m_texCoordVbo);
-  glNamedBufferStorage(this->m_texCoordVbo, texBufferSize,
-                       this->m_vertexTexCoords.data(), GL_DYNAMIC_STORAGE_BIT);
-  glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), 0);
-  glEnableVertexAttribArray(3);
-#endif
+    glCreateBuffers(1, &m_texCoordVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m_texCoordVbo);
+    glNamedBufferStorage(m_texCoordVbo, texBufferSize, m_vertexTexCoords.data(),
+                         GL_DYNAMIC_STORAGE_BIT);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), 0);
+    glEnableVertexAttribArray(3);
+  }
+
+  // Upload the Bounding boxes buffer for the BVH
+  size_t BBBufferSize = sizeof(glm::vec4) * m_boundingBoxes.size();
+  if (BBBufferSize > 0) {
+    glCreateBuffers(1, &m_BBVbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m_BBVbo);
+    glNamedBufferStorage(m_BBVbo, BBBufferSize, m_boundingBoxes.data(),
+                         GL_DYNAMIC_STORAGE_BIT);
+    glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), 0);
+    glEnableVertexAttribArray(4);
   }
 
   // Same for an index buffer object that stores the list of indices of the
   // triangles forming the mesh
-  size_t indexBufferSize =
-      sizeof(unsigned int) * this->m_triangleIndices.size();
-#ifdef _MY_OPENGL_IS_33_
-  glGenBuffers(1, &this->m_ibo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_ibo);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexBufferSize,
-               this->m_triangleIndices.data(), GL_STATIC_DRAW);
-#else
-  glCreateBuffers(1, &this->m_ibo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_ibo);
-  glNamedBufferStorage(this->m_ibo, indexBufferSize,
-                       this->m_triangleIndices.data(), GL_DYNAMIC_STORAGE_BIT);
-#endif
+  size_t indexBufferSize = sizeof(unsigned int) * m_triangleIndices.size();
+
+  glCreateBuffers(1, &m_ibo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo);
+  glNamedBufferStorage(m_ibo, indexBufferSize, m_triangleIndices.data(),
+                       GL_DYNAMIC_STORAGE_BIT);
+
+  // And finally, exactly the same for an index buffer object that stores the
+  // list of indices of the triangles / bounding boxes forming the BVH
+  size_t BVHBufferSize = sizeof(unsigned int) * m_BVH.size();
+
+  glCreateBuffers(1, &m_bvhbo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_bvhbo);
+  glNamedBufferStorage(m_bvhbo, indexBufferSize, m_BVH.data(),
+                       GL_DYNAMIC_STORAGE_BIT);
 
   // We do not deactivate the vao, because material still has to be bound
+  std::cout << "Object::init vao=" << " mesh.posVbo=" << m_posVbo
+            << " texVbo=" << m_texCoordVbo << std::endl;
+
+  // Buffers are already set, we need to rebuild all the bindings though
+  glVertexArrayVertexBuffer(vao, 0, m_posVbo, 0, sizeof(glm::vec3));
+  glEnableVertexArrayAttrib(vao, 0);
+  glVertexArrayAttribFormat(vao, 0, 3, GL_FLOAT, GL_FALSE, 0);
+  glVertexArrayAttribBinding(vao, 0, 0);
+
+  glBindBuffer(GL_ARRAY_BUFFER, m_normalVbo);
+  glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);
+  glEnableVertexAttribArray(2);
+
+  glBindBuffer(GL_ARRAY_BUFFER, m_texCoordVbo);
+  glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), 0);
+  glEnableVertexAttribArray(3);
+
+  glBindBuffer(GL_ARRAY_BUFFER, m_BBVbo);
+  glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), 0);
+  glEnableVertexAttribArray(4);
+
+  glVertexArrayElementBuffer(vao, m_ibo);
+  // glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_bvhbo);
 };
+
+unsigned int indexTransform(unsigned int i, unsigned int f) { return i; }
+
+void Mesh::genBVH() {
+  // Generates the BVH. Should be called upon creation and at each geometry
+  // change
+
+  if (m_triangleIndices.empty())
+    return;
+
+  // Number of triangles (leafs)
+  unsigned int f = m_triangleIndices.size() / 3;
+  // Number of internal nodes
+  unsigned int n = f - 1;
+  // We compute the centroids for each triangle
+  std::vector<glm::vec3> centroids(f, glm::vec3(0));
+  std::vector<AABB> triangle_bounding_boxes(f, AABB());
+  m_BVH.resize(f);
+  for (int i = 0; i < f; i++) {
+    m_BVH[i] = i;
+    glm::vec3 v1 = m_vertexPositions[m_triangleIndices[3 * i]];
+    glm::vec3 v2 = m_vertexPositions[m_triangleIndices[3 * i + 1]];
+    glm::vec3 v3 = m_vertexPositions[m_triangleIndices[3 * i + 2]];
+    triangle_bounding_boxes[i] = AABB(v1, v2, v3);
+    centroids[i] = (v1 + v2 + v3) / 3.f;
+  }
+  m_boundingBoxes.resize(n + f);
+  AABB bb = AABB(m_vertexPositions);
+  unsigned int max_dim = bb.max_dim();
+  // We do an extra simple bottom up approach by :
+  // We trade optimisation for efficiency and simplicity, as computed this way,
+  // the bounding boxes don't split on largest axis each time
+  // 1. Sorting the array of indexes based on their centroids
+  std::sort(m_BVH.begin(), m_BVH.end(),
+            [&centroids, max_dim](unsigned int a, unsigned int b) {
+              return centroids[a][max_dim] < centroids[b][max_dim];
+            });
+  // 2. Computing the bounding boxes bottom up
+  for (int i = n + f - 1; i >= 0; i--) {
+    // If i >= n, then we have a leaf and must calculate the bounding
+    // box of the associated triangle, otherwise we have an internal node and
+    // can compute the bb from children's bb which has necessarily been
+    // calculated
+    if (i >= n)
+      // The index j of the leaf in the m_BVH is j = i - n
+      m_boundingBoxes[i] = triangle_bounding_boxes[m_BVH[i - n]];
+    else
+      m_boundingBoxes[i] =
+          AABB::merge(m_boundingBoxes[2 * i], m_boundingBoxes[2 * i + 1]);
+  }
+}
 
 Mesh Mesh::fromOFF(const std::string filename) {
   std::cout << " > Start loading mesh <" << filename << ">" << std::endl;
@@ -273,15 +313,20 @@ void Object::rotate(float angle, glm::vec3 axis) {
 void Object::init() {
   // Create a single handle, vertex array object that contains attributes,
   // vertex buffer objects (e.g., vertex's position, normal, and color)
-#ifdef _MY_OPENGL_IS_33_
-  glGenVertexArrays(1,
-                    &vao); // If your system doesn't support OpenGL 4.5, you
-                           // should use this instead of glCreateVertexArrays.
-#else
+
   glCreateVertexArrays(1, &vao);
-#endif
+
   glBindVertexArray(vao);
-  mesh->init();
+  GLint enabled = 0;
+  glGetVertexAttribiv(0, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+  std::cout << "attrib0 enabled=" << enabled << "\n";
+  glGetVertexAttribiv(3, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+  std::cout << "attrib3 enabled=" << enabled << "\n";
+  GLint elem = 0;
+  glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elem);
+  std::cout << "element array bound = " << elem << "\n";
+
+  mesh->init(vao);
 }
 
 void Object::render(std::shared_ptr<ShaderProgram> shader) {
@@ -289,7 +334,7 @@ void Object::render(std::shared_ptr<ShaderProgram> shader) {
   // Setting uniforms
 
   // Material uniforms
-  mat->apply(shader);
+  // mat->apply(shader);
 
   // Object uniforms
   shader->set("modelMat", transform);
@@ -299,6 +344,13 @@ void Object::render(std::shared_ptr<ShaderProgram> shader) {
   glBindVertexArray(vao);
   // Call for rendering: stream the current GPU geometry through the current GPU
   // program
+  GLint currVAO = 0;
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currVAO);
+  std::cout << "drawing vao=" << currVAO
+            << " elementArrayBinding=" /*<< getBoundElementArrayBuffer()*/
+            << std::endl;
+
   glDrawElements(GL_TRIANGLES, mesh->get_triangles_size(), GL_UNSIGNED_INT, 0);
+  std::cout << "draw count = " << mesh->get_triangles_size() << std::endl;
   glBindVertexArray(0);
 }

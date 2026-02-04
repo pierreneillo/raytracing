@@ -2,8 +2,8 @@
 
 in vec2 fTexCoord;
 
-out vec4 colorOut;
+out vec4 FragColor;
 
 uniform sampler2D screenTexture;
 
-void main() { colorOut = texture(screenTexture, fTexCoord); }
+void main() { FragColor = texture(screenTexture, fTexCoord); }

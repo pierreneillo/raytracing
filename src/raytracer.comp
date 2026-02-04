@@ -8,9 +8,6 @@ layout(rgba32f, binding = 0) uniform image2D img_output;
 #define UNDEF_MATERIAL 0
 #define PHONG_MATERIAL 1
 
-// Debug: visualize SSBO contents
-#define DEBUG_SSBO 0
-
 // All structs below are supposedly 16-bytes aligned
 
 struct Mesh {
@@ -31,9 +28,7 @@ struct Material {
   vec4 ambient;
   vec4 diffuse;
   vec4 specular;
-  float shininess;
-  int type;
-  int pad1, pad2; // Pad to 16-byte boundary
+  vec4 st; // Shininess and type + 2 padding
 };
 
 struct Object {
@@ -46,26 +41,29 @@ struct LightSource {
   vec4 color; // w = isActive (1 = true, 0 = false)
 };
 
+struct AABB {
+  // Axis-aligned bounding box
+  vec3 m; // min coords
+  vec3 M; // max coords
+  vec3 c;
+};
+
 // SSBOs (used as read-only)
 
-layout(std430, binding = 1) buffer VertexBuffer { Vertex data[]; }
-vertices;
-layout(std430, binding = 2) buffer TriangleBuffer { uint data[]; }
-indices;
-layout(std430, binding = 3) buffer MeshBuffer { Mesh data[]; }
-meshes;
-layout(std430, binding = 4) buffer MaterialBuffer { Material data[]; }
-materials;
-layout(std430, binding = 5) buffer ObjectBuffer { Object data[]; }
-objects;
-layout(std430, binding = 6) buffer LightBuffer { LightSource data[]; }
-lights;
+layout(std430, binding = 1) buffer VertexBuffer { Vertex vertices[]; };
+layout(std430, binding = 2) buffer TriangleBuffer { uint indices[]; };
+layout(std430, binding = 3) buffer MeshBuffer { Mesh meshes[]; };
+layout(std430, binding = 4) buffer MaterialBuffer { Material materials[]; };
+layout(std430, binding = 5) buffer ObjectBuffer { Object objects[]; };
+layout(std430, binding = 6) buffer LightBuffer { LightSource lights[]; };
+layout(std430, binding = 7) buffer AABBBuffer { AABB boudingBoxes[]; };
+layout(std430, binding = 8) buffer BVHBuffer { uint BVH[]; };
 
 // Global parameters
 
 uniform int w, h;
 
-uniform int nLights, nTriangles;
+uniform int nLights, nTriangles, nObjects;
 
 // Perspective camera, we suppose that the aspect ratio is the same as that of
 // the screen
@@ -82,10 +80,34 @@ uniform Camera camera;
 
 // Struct for data handling inside the shader
 
+// ################
+// #     RAY      #
+// ################
+
 struct Ray {
   vec3 eye;
   vec3 direction;
 };
+
+// Calculates point along ray for parameter t
+vec3 at(Ray r, float t) { return r.eye + t * r.direction; }
+
+// #############
+// #    SET    #
+// #############
+
+// Represents a set of triangles
+struct Set {
+  uint iMin;
+  uint iMax;
+};
+
+// ##############
+// # Primitives #
+// ##############
+
+// Graphical primitives that are either used for shape building or for bounding
+// boxes
 
 struct Sphere {
   vec3 C;
@@ -96,6 +118,35 @@ struct Triangle {
   Vertex v1, v2, v3;
 };
 
+vec3 AABBNormal(AABB bb, vec3 p) {
+  // Calculates the normal of the vector on a face of the AABB
+  // There are only 6 possible values for the normal
+  // We calculate distance to faces and choose the normal of the closest face
+  vec3 dm = p - bb.m;
+  vec3 dM = bb.M - p;
+
+  float minD = min(min(min(dm.x, dm.y), min(dm.z, dM.x)), min(dM.y, dM.z));
+
+  // We check which has the minimun dist to the point
+  vec3 n = vec3((minD == dm.x)   ? -1.0
+                : (minD == dM.x) ? 1.0
+                                 : 0.0,
+                (minD == dm.y)   ? -1.0
+                : (minD == dM.y) ? 1.0
+                                 : 0.0,
+                (minD == dm.z)   ? -1.0
+                : (minD == dM.z) ? 1.0
+                                 : 0.0);
+
+  return n;
+}
+
+AABB wrapAround(Set s) { return AABB(vec3(0.), vec3(0.), vec3(0.)); }
+
+// #############
+// #    Hit    #
+// #############
+
 // used to store hits
 struct Hit {
   vec3 p;          // Position
@@ -104,14 +155,40 @@ struct Hit {
   bool front_face; // Tells whether the ray has hit the object from the outside
 };
 
-struct Hittable {
-  int type;
+// ##############
+// #  Interval  #
+// ##############
+
+struct Interval {
+  float s, e;
 };
 
-// Calculates point along ray for parameter t
-vec3 at(Ray r, float t) { return r.eye + t * r.direction; }
+bool isEmpty(Interval a) { return a.s > a.e; }
 
-bool hits(Sphere s, Ray r, float tmin, float tmax, out Hit hit) {
+Interval makeInterval(float t1, float t2) {
+  if (t1 <= t2)
+    return Interval(t1, t2);
+  else
+    return Interval(t2, t1);
+}
+
+bool contains(Interval a, float t) { return a.s <= t && t <= a.e; }
+
+bool overlap(Interval a, Interval b) { return b.s <= a.e && a.s <= b.e; }
+
+bool intersection(Interval a, Interval b, out Interval c) {
+  if (overlap(a, b)) {
+    c = Interval(max(a.s, b.s), min(a.e, b.e));
+    return true;
+  }
+  return false;
+}
+
+// #################
+// # Hit detection #
+// #################
+
+bool hits(Sphere s, Ray r, Interval i, out Hit hit) {
   // Computation of the intersection with the sphere
   // Given P(t) = at(r,t), we have an intersection along the ray iff
   // there is a t > 0 such as (C - P(t))·(C - P(t)) == r²
@@ -129,7 +206,7 @@ bool hits(Sphere s, Ray r, float tmin, float tmax, out Hit hit) {
 
   if (delta > 0) {
     float t = h - sqrt(delta);
-    if (tmin <= t && t <= tmax) {
+    if (contains(i, t)) {
       hit.p = at(r, t);
       // The normal is simply the center to point vector, normalized
       hit.n = normalize(hit.p - s.C);
@@ -145,7 +222,7 @@ bool hits(Sphere s, Ray r, float tmin, float tmax, out Hit hit) {
     return false;
 }
 
-bool hits(Triangle tri, Ray r, float tmin, float tmax, out Hit hit) {
+bool hits(Triangle tri, Ray r, Interval i, out Hit hit) {
   // Implementation of the Möller-Trumbore algorithm
   vec3 e1 = tri.v2.p.xyz - tri.v1.p.xyz;
   vec3 e2 = tri.v3.p.xyz - tri.v1.p.xyz;
@@ -173,7 +250,7 @@ bool hits(Triangle tri, Ray r, float tmin, float tmax, out Hit hit) {
   // on the line.
   float t = idet * dot(e2, sxe1);
 
-  if (t > tmin && t < tmax) {
+  if (contains(i, t)) {
     // Yeepee, there is an intersection
     hit.t = t;
     hit.p = r.eye + r.direction * t;
@@ -191,19 +268,48 @@ bool hits(Triangle tri, Ray r, float tmin, float tmax, out Hit hit) {
   return false;
 }
 
-bool nearestHit(Ray r, float tmin, float tmax, out Hit hit, out int tri) {
+bool hits(AABB bb, Ray r, Interval i, out Hit hit) {
+  // We first eliminate on a simple criteria
+  vec3 d = r.direction;
+  vec3 o = r.eye;
+  if ((d.x == 0 && (bb.m.x > d.x || bb.M.x < d.x)) ||
+      (d.y == 0 && (bb.m.y > d.y || bb.M.y < d.y)) ||
+      (d.z == 0 && (bb.m.z > d.z || bb.M.z < d.z)))
+    return false;
+  // We calculate t intervals in which the ray intersects with each of the axis
+  Interval j = i;
+  for (int dim = 0; dim < 3; dim++) {
+    // The ray has equation O + tD and the planes are at [dim] = m and [dim] = M
+    // Therefore the two hit times respect O + tD = m => t = (m - O)/D, and idem
+    // t = (M - O)/D
+    float t1 = (bb.M[dim] - o[dim]) / d[dim];
+    float t2 = (bb.m[dim] - o[dim]) / d[dim];
+    if (!intersection(j, makeInterval(t1, t2), j) || isEmpty(j))
+      return false;
+  }
+  if (isEmpty(j))
+    return false;
+  else {
+    hit.t = j.s;
+    hit.p = at(r, j.s);
+    hit.n = AABBNormal(bb, hit.p);
+    hit.front_face = dot(hit.n, d) < 0;
+    hit.n = hit.front_face ? hit.n : -hit.n;
+    return true;
+  }
+}
+
+bool nearestHit(Ray r, Interval i, out Hit hit, out int tri) {
   // We check for all primitives in the scene
   // For now, only triangles
-  hit.t = tmax;
   bool did_hit = false;
-  float closest_now = tmax;
+  float closest_now = i.e;
   for (int i = 0; i < nTriangles; i++) {
-    uint i0 = indices.data[3 * i];
-    uint i1 = indices.data[3 * i + 1];
-    uint i2 = indices.data[3 * i + 2];
-    Triangle t =
-        Triangle(vertices.data[i0], vertices.data[i1], vertices.data[i2]);
-    if (hits(t, r, tmin, closest_now, hit)) {
+    uint i0 = indices[3 * i];
+    uint i1 = indices[3 * i + 1];
+    uint i2 = indices[3 * i + 2];
+    Triangle t = Triangle(vertices[i0], vertices[i1], vertices[i2]);
+    if (hits(t, r, Interval(i.s, closest_now), hit)) {
       did_hit = true;
       tri = i;
       closest_now = hit.t;
@@ -213,9 +319,18 @@ bool nearestHit(Ray r, float tmin, float tmax, out Hit hit, out int tri) {
 }
 
 // Shading with materials
+void findObject(int t, out Object o) {
+  for (int i = 0; i < nObjects; i++) {
+    Mesh m = meshes[objects[i].meshID];
+    if (m.tStart + m.nTriangles > t) {
+      o = objects[i];
+      return;
+    }
+  }
+}
 
 vec3 defaultShade(Hit hit, Material material) {
-  switch (material.type) {
+  switch (int(material.st.y)) {
   case PHONG_MATERIAL:
     return material.ambient.rgb * material.ambient.w;
   case UNDEF_MATERIAL:
@@ -226,7 +341,7 @@ vec3 defaultShade(Hit hit, Material material) {
 }
 
 vec3 shade(Hit hit, Material material, LightSource light) {
-  switch (material.type) {
+  switch (int(material.st.t)) {
   case PHONG_MATERIAL:
     vec3 lightPos = light.pos.xyz;
     float intensity = light.pos.w;
@@ -249,7 +364,7 @@ vec3 shade(Hit hit, Material material, LightSource light) {
         light.color.rgb * material.diffuse.rgb * diffCoeff * material.diffuse.w;
 
     // 4. Specular Component
-    float specCoeff = pow(max(dot(hit.n, h), 0.), material.shininess);
+    float specCoeff = pow(max(dot(hit.n, h), 0.), material.st.x);
     vec3 specular = light.color.rgb * material.specular.rgb * specCoeff *
                     material.specular.w;
 
@@ -264,14 +379,6 @@ vec3 shade(Hit hit, Material material, LightSource light) {
 }
 
 void main() {
-#if DEBUG_SSBO
-  vec3 v0 = vertices.data[0].p.xyz * 0.5 + 0.5;
-  vec3 i0 = vec3(float(indices.data[0]) / 10.0, float(indices.data[1]) / 10.0,
-                 float(indices.data[2]) / 10.0);
-  vec3 dbg = (nTriangles > 0) ? v0 : i0;
-  imageStore(img_output, coords, vec4(dbg, 1));
-  return;
-#endif
 
   // gl_LocalInvocationID.xy * gl_WorkGroupID.xy == gl_GlobalInvocationID
   ivec2 coords = ivec2(gl_GlobalInvocationID);
@@ -303,10 +410,7 @@ void main() {
       vec4(1, 0, 0, .2),
       vec4(1, 0, 0, .7),
       vec4(1, 1, 1, .01),
-      32.,
-      PHONG_MATERIAL,
-      0,
-      0,
+      vec4(32., PHONG_MATERIAL, 0, 0),
   };
   // float alpha = coords.y / float(h);
   // vec3 blue = vec3(0, .2, 1);
@@ -317,30 +421,29 @@ void main() {
   // Default pixel value
   vec3 pixel = background_color;
   Hit hit;
-  int tri;
-  if (nearestHit(r, 0., 1. / 0., hit, tri)) {
+  int tri = 0;
+  if (nearestHit(r, Interval(0., 1. / 0.), hit, tri)) {
     // We create as many rays as there are lights and look for intersections
     // along the way
-    pixel = defaultShade(hit, sphereMat);
+    Object o;
+    findObject(tri, o);
+    Material mat = materials[o.materialID];
+    pixel = defaultShade(hit, mat);
     bool lit = false;
     for (int i = 0; i < nLights; i++) {
-      LightSource light = lights.data[i];
+      LightSource light = lights[i];
       // Shadow ray
       vec3 L = vec3(light.pos) - hit.p;
       Ray sr = {hit.p, normalize(L)};
       Hit obstacleHit;
-      int triHit;
-      if (!nearestHit(sr, 0.001, length(L), obstacleHit, triHit)) {
+      int obstacleTriHit;
+      if (!nearestHit(sr, Interval(0.001, length(L)), obstacleHit,
+                      obstacleTriHit)) {
         // There is light (yepee)
-        pixel += shade(hit, sphereMat, light);
+        // We shade with the material
+        pixel += shade(hit, mat, light);
       };
     }
-  } else {
-    Triangle first =
-        Triangle(vertices.data[indices.data[0]], vertices.data[indices.data[1]],
-                 vertices.data[indices.data[2]]);
-    if (hits(first, r, 0., 1. / 0., hit))
-      pixel = vec3(1.);
   }
   imageStore(img_output, coords, vec4(pixel, 1));
 }

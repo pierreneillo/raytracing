@@ -14,7 +14,6 @@
 
 #include <cmath>
 #include <cstdlib>
-#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -22,25 +21,104 @@
 #include "ShaderProgram.hpp"
 #include "constants.hpp"
 
+glm::vec3 cmin(glm::vec3 a, glm::vec3 b);
+
+glm::vec3 cmax(glm::vec3 a, glm::vec3 b);
+
+struct AABB {
+  using Iter = typename std::vector<AABB>::iterator;
+  glm::vec3 vmin;
+  glm::vec3 vmax;
+  glm::vec3 vcenter;
+
+  explicit AABB(const std::vector<glm::vec3> &data) {
+    // Calculate a tight-fitting Axis-Aligned Bounding Box
+    vmin = data[0];
+    vmax = data[0];
+    for (auto &v : data) {
+      vmin = cmin(v, vmin);
+      vmax = cmax(v, vmax);
+    }
+    vcenter = (vmin + vmax) / 2.f;
+  }
+
+  explicit AABB(const glm::vec3 &vmin = glm::vec3(0.f),
+                const glm::vec3 &vmax = glm::vec3(0.f))
+      : vmin(vmin), vmax(vmax) {
+    vcenter = (vmin + vmax) / 2.f;
+  };
+
+  explicit AABB(const glm::vec3 a, glm::vec3 b, glm::vec3 c) {
+    // For bounding boxes of triangles
+    vmin = cmin(a, cmin(b, c));
+    vmax = cmax(a, cmax(b, c));
+    vcenter = (vmin + vmax) / 2.f;
+  }
+
+  bool intersects(const AABB &bb) const {
+    if (vmax.x < bb.vmin.x || vmin.x > bb.vmax.x)
+      return false;
+    if (vmax.y < bb.vmin.y || vmin.y > bb.vmax.y)
+      return false;
+    if (vmax.z < bb.vmin.z || vmin.z > bb.vmax.z)
+      return false;
+    return true;
+  }
+
+  static AABB merge(Iter begin, Iter end) {
+    if (begin == end)
+      return AABB(glm::vec3(0.f), glm::vec3(0.f));
+
+    glm::vec3 vmin = begin->vmin;
+    glm::vec3 vmax = begin->vmax;
+
+    for (Iter it = begin; it != end; ++it) {
+      vmin = cmin(vmin, it->vmin);
+      vmax = cmax(vmax, it->vmax);
+    }
+
+    return AABB(vmin, vmax);
+  }
+
+  static AABB merge(AABB a, AABB b) {
+    return AABB(cmin(a.vmin, b.vmin), cmax(a.vmax, b.vmax));
+  }
+
+  unsigned int max_dim() {
+    float dx = vmax.x - vmin.x;
+    float dy = vmax.y - vmin.y;
+    float dz = vmax.z - vmin.z;
+
+    return (dx > dy) ? ((dx > dz) ? 0 : 2) : (dy > dz) ? 1 : 2;
+  }
+};
+
 class Mesh {
 public:
   Mesh(std::vector<glm::vec3> positions,
        std::vector<unsigned int> triangle_indices)
-      : m_vertexPositions(positions), m_triangleIndices(triangle_indices){};
+      : m_vertexPositions(positions), m_triangleIndices(triangle_indices) {
+    genBVH();
+  };
 
   Mesh(std::vector<glm::vec3> positions, std::vector<glm::vec3> normals,
        std::vector<unsigned int> triangle_indices)
       : m_vertexPositions(positions), m_vertexNormals(normals),
-        m_triangleIndices(triangle_indices){};
+        m_triangleIndices(triangle_indices) {
+    genBVH();
+  };
 
   Mesh(std::vector<glm::vec3> positions, std::vector<glm::vec3> normals,
        std::vector<glm::vec2> texCoords,
        std::vector<unsigned int> triangle_indices)
       : m_vertexPositions(positions), m_vertexNormals(normals),
-        m_vertexTexCoords(texCoords), m_triangleIndices(triangle_indices){};
+        m_vertexTexCoords(texCoords), m_triangleIndices(triangle_indices) {
+    genBVH();
+  };
 
   ~Mesh();
-  void init();
+  void init(GLuint vao);
+  void genBVH();
   static Mesh fromOFF(std::string filename);
   static Mesh genSphere(const unsigned int resolution = 32);
   static std::shared_ptr<Mesh> &genPlane() {
@@ -68,6 +146,9 @@ public:
     return m_vertexPositions;
   };
   const std::vector<glm::vec3> &get_normals() const { return m_vertexNormals; };
+  const std::vector<AABB> &get_BB() const { return m_boundingBoxes; }
+  const std::vector<unsigned int> &get_BVH() const { return m_BVH; }
+  const unsigned int get_BVH_size() const { return m_BVH.size(); }
   int get_triangles_size() const { return m_triangleIndices.size(); };
   int get_vertex_count() const { return m_vertexPositions.size(); }
 
@@ -78,10 +159,14 @@ private:
   std::vector<glm::vec3> m_vertexNormals;
   std::vector<glm::vec2> m_vertexTexCoords;
   std::vector<unsigned int> m_triangleIndices;
+  std::vector<AABB> m_boundingBoxes;
+  std::vector<unsigned int> m_BVH;
   GLuint m_posVbo = 0;
   GLuint m_normalVbo = 0;
   GLuint m_texCoordVbo = 0;
+  GLuint m_BBVbo = 0;
   GLuint m_ibo = 0;
+  GLuint m_bvhbo = 0;
   // .
 };
 
