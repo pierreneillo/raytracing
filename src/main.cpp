@@ -12,6 +12,8 @@ Camera *camPtr = nullptr;
 
 cudaGraphicsResource *current_pos_buffer;
 
+bool windowHasChanged = false;
+
 // *****************
 // *  Shader mgmt  *
 // *****************
@@ -69,6 +71,7 @@ void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
   w = width;
   h = height;
   aspect = (float)width / (float)height;
+  windowHasChanged = true;
 }
 
 void printHelp() {
@@ -148,6 +151,56 @@ int initGLX() {
   return 0;
 }
 
+Object makePlane(real3 centerPos, real size, int axis, Material planeMat) {
+
+  // We generate the vertices and normals for a basic quad that would be aligned
+  // at y = 0, and of width 2
+  real3 *verts = new real3[4]{
+      {-1, 0, -1},
+      {-1, 0, 1},
+      {1, 0, 1},
+      {1, 0, -1},
+  };
+  real3 *norms = new real3[4]{
+      {0, 1, 0},
+      {0, 1, 0},
+      {0, 1, 0},
+      {0, 1, 0},
+  };
+  size_t *indices = new size_t[6]{0, 1, 2, 0, 2, 3};
+
+  glm::mat4 model = glm::mat4(1.0f);
+
+  // First translate to the central pos
+  model = glm::translate(model, glm::vec3(centerPos));
+
+  // Rotate based on inputted axis
+  if (axis == 0)
+    model = glm::rotate(model, glm::radians(-sign(centerPos.x) * 90.0f),
+                        glm::vec3(0, 0, 1));
+  else if (axis == 2)
+    model = glm::rotate(model, glm::radians(sign(centerPos.z) * 90.0f),
+                        glm::vec3(1, 0, 0));
+  else if (centerPos.y > 0)
+    model = glm::rotate(model, glm::radians(180.0f), glm::vec3(0, 1, 0));
+
+  model = glm::scale(model, glm::vec3(size));
+
+  glm::mat4x4 normalModel = glm::inverse(glm::transpose(model));
+  for (int i = 0; i < 4; i++)
+    verts[i] = glm::vec3(model * glm::vec4(glm::vec3(verts[i]), 1.));
+  for (int i = 0; i < 4; i++)
+    norms[i] = glm::vec3(normalModel * glm::vec4(glm::vec3(norms[i]), 1.));
+
+  Object plane = {planeMat,
+                  TRIANGLE,
+                  {.triangleMesh = {verts, norms, 4, indices}},
+                  2,
+                  {centerPos - size, centerPos + size}};
+
+  return plane;
+}
+
 int main() {
   setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
   setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
@@ -158,30 +211,39 @@ int main() {
   // Compile Shaders and create program
   program = createBasicProgram();
 
-  static Camera cam =
-      Camera(real3(0, 0, 1. / glm::atan(glm::radians(22.5))) + .5,
-             real3(0, 0, 0), real3(0, 1, 0), 45.f);
+  static Camera cam = Camera(real3(0, 0, 2. / glm::atan(glm::radians(22.5))),
+                             real3(0, 0, 0), real3(0, 1, 0), 45.f);
 
   camPtr = &cam;
 
   RCamera rcam = {cam.eye, cam.at, cam.up, cam.fov, cam.near, cam.far, aspect};
 
   // Temporary setup
-  LightSource lights[3] = {
-      {real3(0., 2., 0.), 1.f, real3(1., 1., 1.), true},
-      {real3(2., .5, -.2), .5f, real3(1., 1., .8), true},
-      {real3(2., -1., 0.), .5f, real3(1., .8, .3), true},
+#define N_LIGHTS 3
+  LightSource lights[N_LIGHTS] = {
+      {real3(0., 3, 0.), 1.f, real3(1., 1., 1.), true},
+      {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
+      // {real3(.8, -.5, 0.), .5f, real3(1., .8, .3), true},
 
   };
 
   // Sphere of radius r and center C
-  Sphere s = {real3(), 1};
+  Sphere s = {real3(-.5, 0, 0), 1};
+  Sphere s2 = {real3(1, 0, 0), .5};
   // Red material for the sphere
   Material sphereMat = {
-      real3(1, 0, 0), .1, real3(1, 0, 0), .96, real3(1, 1, 1), .04, 32.,
+      real3(1, 0, 0), .2, real3(1, 0, 0), 1, real3(1, 1, 1), 0, 32.,
       PHONG_MATERIAL};
+  Material sphereMat2 = {
+      real3(1, 1, 1), .2, real3(1, 0, 0), .5, real3(1, 1, 1), .5, 32.,
+      PHONG_MATERIAL};
+
   Material planeMat = {
-      real3(1., 1., 1.), .0, real3(1., 1., 1.), .5, real3(1, 1, 1), .7, 32.,
+      real3(1., 1., 1.), .1, real3(1., 1., 1.), .1, real3(1, 1, 1), .9, 32.,
+      PHONG_MATERIAL};
+
+  Material transparentMat = {
+      real3(1., 1., 1.), 0, real3(1., 1., 1.), 0, real3(1, 1, 1), 1, 32.,
       PHONG_MATERIAL};
 
   Object st = {
@@ -195,33 +257,15 @@ int main() {
       },
 
   };
-  Object so = {sphereMat, SPHERE, {&s}, 1, {{-1, -1, -1}, {1, 1, 1}}};
-  float pS = 3;
-  real3 planeVertices[4] = {
-      {-pS, -1, -pS},
-      {-pS, -1, pS},
-      {pS, -1, pS},
-      {pS, -1, -pS},
-  };
-  real3 planeNormals[4] = {
-      {0, 1, 0},
-      {0, 1, 0},
-      {0, 1, 0},
-      {0, 1, 0},
-  };
-  size_t planeTris[6] = {0, 1, 2, 0, 2, 3};
-  Object plane = {planeMat,
-                  TRIANGLE,
-                  {.triangleMesh =
-                       {
-                           planeVertices,
-                           planeNormals,
-                           4,
-                           planeTris,
-                       }},
-                  2,
-                  {{-1, -1, -1}, {1, -1, 1}}};
-  Object objects[2] = {so, plane};
+  Object so = {sphereMat, SPHERE, {&s}, 1, {{-1.5, -1, -1}, {.5, 1, 1}}};
+  Object so2 = {sphereMat2, SPHERE, {&s2}, 1, {{.5, -.5, -.5}, {1.5, .5, .5}}};
+#define N_OBJ 6
+  Object objects[N_OBJ] = {so,
+                           so2,
+                           makePlane({0, 0, -2}, 2, 2, transparentMat),
+                           makePlane({0, -2, 0}, 2, 1, transparentMat),
+                           makePlane({-2, 0, 0}, 2, 0, planeMat),
+                           makePlane({2, 0, 0}, 2, 0, planeMat)};
 
   GLuint vao;
   glCreateVertexArrays(1, &vao);
@@ -244,24 +288,29 @@ int main() {
   glUseProgram(program);
   glBindTextureUnit(0, texture);
 
-  init_raytracing(rcam, lights, 3, objects, 2, h_framebuffer);
+  init_raytracing(rcam, lights, N_LIGHTS, objects, N_OBJ, h_framebuffer);
 
   while (!glfwWindowShouldClose(window)) {
     rcam.eye = cam.eye;
-    rcam.aspect = aspect;
+    if (windowHasChanged) {
+      windowHasChanged = false;
+      rcam.aspect = aspect;
+      h_framebuffer = (float4 *)realloc(h_framebuffer, sizeof(float4) * w * h);
+      glDeleteTextures(1, &texture);
+      glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+      glTextureStorage2D(texture, 1, GL_RGBA32F, w, h);
+      glBindTextureUnit(0, texture);
+    }
     updateCamera(rcam);
-    std::cout << w << ", " << h << std::endl;
     float last_t = glfwGetTime();
     raytrace(h_framebuffer);
     float delta = glfwGetTime() - last_t;
     std::cout << "Raytracing time : " << delta << std::endl;
 
-    glTextureSubImage2D(texture, 0, 0, 0, iw, ih, GL_RGBA, GL_FLOAT,
+    glTextureSubImage2D(texture, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT,
                         h_framebuffer);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(program);
-    glBindTextureUnit(0, texture);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glfwSwapBuffers(window);

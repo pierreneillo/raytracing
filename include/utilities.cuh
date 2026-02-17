@@ -78,7 +78,7 @@ struct real3 {
   __host__ __device__ real3 &operator/=(const real3 &r) {
     x /= r.x;
     y /= r.y;
-    z /= r.y;
+    z /= r.z;
     return *this;
   }
 

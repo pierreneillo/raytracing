@@ -6,7 +6,8 @@ extern float aspect;
 
 extern uint recursion_depth;
 
-#define EPSILON .001
+#define EPSILON .0001
+#define THROUGHPUT_EPSILON .001
 
 inline __device__ void imageStore(float4 *image, uint w, uint2 coords,
                                   float4 value) {

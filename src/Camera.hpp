@@ -35,6 +35,10 @@ struct Camera {
     vec3 right = glm::cross(up, direction);
     mat4 YRot = glm::rotate(mat4(1.f), -r.y * moving_speed.y, right);
     direction = vec3(YRot * vec4(direction, 1.f));
+    if (abs(glm::dot(up, glm::normalize(direction))) > 1 - EPSILON) {
+      std::cout << "No rotation for you :)" << std::endl;
+      return;
+    }
 
     eye = at + direction;
   }
@@ -48,5 +52,5 @@ struct Camera {
   float near = 0.01;
   float far = 100000;
   CamType t = PERSPECTIVE;
-  vec3 moving_speed = {.01, .01, .005};
+  vec3 moving_speed = {.01, .01, .01};
 };

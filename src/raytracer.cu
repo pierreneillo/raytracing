@@ -11,7 +11,7 @@
 uint w = 1920;
 uint h = 1080;
 float aspect = (float)w / (float)h;
-uint recursion_depth = 1;
+uint recursion_depth = 3;
 
 glm::mat4x4 RCamera::matrix() {
   return glm::perspective(glm::radians(fov), aspect, near, far) *
@@ -100,6 +100,9 @@ struct Ray {
     real3 e2 = tri.v3 - tri.v1;
     real3 rxe2 = cross(dir, e2);
     float det = dot(e1, rxe2);
+
+    // if (det > EPSILON)
+    //   return false;
 
     // We consider the ray is parallel
     if (abs(det) < 0.0001)
@@ -231,14 +234,18 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
                        Object *objects, uint nObjects,
                        uint recursion_depth = 0) {
 
-  Hit hit;
-  if (r.nearestHit(objects, nObjects, Interval(0., 1. / 0.), hit)) {
+  real3 color = real3();
+  real throughput = 1;
+  Ray current_ray = r;
+  for (int depth = 0; depth <= recursion_depth; depth++) {
+    Hit hit;
+    if (!current_ray.nearestHit(objects, nObjects, Interval(0., 1. / 0.), hit))
+      break;
     Material material = objects[hit.k].mat;
     // We create as many rays as there are lights and look for intersections
     // along the way
 
-    real3 v = r.dir;
-    real3 color = defaultShade(material);
+    real3 v = -current_ray.dir;
 
     // Shadow ray
     for (int i = 0; i < nLights; i++) {
@@ -273,21 +280,24 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
             light.color * material.specular * specCoeff * material.kS;
 
         // Attenuate
-        color += (diffuse + specular) * attenuation;
+        color += (diffuse + specular) * attenuation * throughput;
       }
     }
+    // Ambient color
+    color += defaultShade(material) * throughput;
 
-    if (recursion_depth > 0) {
+    if (depth < recursion_depth) {
       // We trace reflected ray and refracted ray if needed
       // Refraction dir is the symmetric of ray dir relative to normal:
-      real3 reflected_dir = r.dir - 2 * hit.n * dot(hit.n, r.dir);
-      Ray reflected = Ray(hit.p + EPSILON * reflected_dir, reflected_dir);
-      color += material.kS * shade(reflected, lights, nLights, objects,
-                                   nObjects, recursion_depth - 1);
+      real3 reflected_dir =
+          current_ray.dir - 2 * hit.n * dot(hit.n, current_ray.dir);
+      current_ray = Ray(hit.p + EPSILON * hit.n, reflected_dir);
+      throughput *= material.kS;
+      if (throughput < THROUGHPUT_EPSILON)
+        break;
     }
-    return color;
   }
-  return real3();
+  return color;
 }
 
 __global__ void raytraceKernel(RCamera cam, LightSource *lights, uint nLights,
@@ -435,6 +445,7 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
 
 void raytrace(float4 *framebuffer) {
   scene.cam.aspect = aspect;
+  printf("W : %d\n", w);
 
   glm::mat4x4 camMat = scene.cam.matrix();
   glm::mat4x4 invCamMat = glm::inverse(camMat);
