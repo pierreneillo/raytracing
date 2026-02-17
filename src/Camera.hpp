@@ -1,65 +1,52 @@
-#ifndef CAMERA_H
-#define CAMERA_H
+#include "Utils.hpp"
 
-#include <glm/ext.hpp>
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/ext/matrix_transform.hpp>
+#include <glm/geometric.hpp>
 #include <glm/glm.hpp>
 
-// Basic camera model
-class Camera {
-public:
-  const glm::vec3 &getPosition() const { return _pos; }
-  void setPosition(const glm::vec3 &t) { _pos = t; }
-  const glm::vec3 &getRotation() const { return _rotation; }
-  void setRotation(const glm::vec3 &r) { _rotation = r; }
-  glm::vec3 getUp() const {
-    glm::mat4 rot =
-        glm::rotate(glm::mat4(1.0), _rotation[0], glm::vec3(1.0, 0.0, 0.0));
-    rot = glm::rotate(rot, _rotation[1], glm::vec3(0.0, 1.0, 0.0));
-    rot = glm::rotate(rot, _rotation[2], glm::vec3(0.0, 0.0, 1.0));
-    return glm::vec3(rot[1]);
-  }
-  glm::vec3 getAt() const {
-    glm::mat4 rot =
-        glm::rotate(glm::mat4(1.0), _rotation[0], glm::vec3(1.0, 0.0, 0.0));
-    rot = glm::rotate(rot, _rotation[1], glm::vec3(0.0, 1.0, 0.0));
-    rot = glm::rotate(rot, _rotation[2], glm::vec3(0.0, 0.0, 1.0));
-    return -glm::vec3(rot[2]);
-  }
-  float getFov() const { return _fov; }
-  void setFoV(float f) { _fov = f; }
-  float getAspectRatio() const { return _aspectRatio; }
-  void setAspectRatio(float a) { _aspectRatio = a; }
-  float getNear() const { return _near; }
-  void setNear(float n) { _near = n; }
-  float getFar() const { return _far; }
-  void setFar(float n) { _far = n; }
+using namespace glm;
 
-  glm::mat4 computeViewMatrix() const {
-    glm::mat4 rot =
-        glm::rotate(glm::mat4(1.0), _rotation[0], glm::vec3(1.0, 0.0, 0.0));
-    rot = glm::rotate(rot, _rotation[1], glm::vec3(0.0, 1.0, 0.0));
-    rot = glm::rotate(rot, _rotation[2], glm::vec3(0.0, 0.0, 1.0));
-    const glm::mat4 trn = glm::translate(glm::mat4(1.0), _pos);
-    return glm::inverse(rot * trn);
+enum CamType { ORTHOGRAPHIC, PERSPECTIVE };
+
+struct Camera {
+  explicit Camera(vec3 pos = {0, 0, -1}, vec3 at = {0, 0, 0},
+                  vec3 up = vec3({0, 1, 0}), float fov = 45)
+      : eye(pos), at(at), up(up), fov(fov) {};
+  mat4x4 viewProjMat() {
+    switch (t) {
+    case ORTHOGRAPHIC:
+      std::cout << "Not implemented" << std::endl;
+      return perspective(radians(fov), aspect, near, far) * lookAt(eye, at, up);
+    case PERSPECTIVE:
+      return perspective(radians(fov), aspect, near, far) * lookAt(eye, at, up);
+    }
+    return perspective(radians(fov), aspect, near, far) * lookAt(eye, at, up);
   }
 
-  // Returns the projection matrix stemming from the camera intrinsic parameter.
-  glm::mat4 computeProjectionMatrix() const {
-    return glm::perspective(glm::radians(_fov), _aspectRatio, _near, _far);
+  void rotate(vec2 r) {
+    vec3 direction = eye - at;
+
+    // We rotate around the up vector with r.x angle
+    mat4 XRot = glm::rotate(mat4(1.f), -r.x * moving_speed.x, up);
+    direction = vec3(XRot * vec4(direction, 1.f));
+
+    // Same symmetrically
+    vec3 right = glm::cross(up, direction);
+    mat4 YRot = glm::rotate(mat4(1.f), -r.y * moving_speed.y, right);
+    direction = vec3(YRot * vec4(direction, 1.f));
+
+    eye = at + direction;
   }
 
-private:
-  glm::vec3 _pos = glm::vec3(0, 0, -10);
-  glm::vec3 _rotation = glm::vec3(0, 0, 0);
+  void zoomin(float x) { eye += moving_speed.z * x * (at - eye); }
 
-  float _fov = 45.f; // Field of view, in degrees
-  float _aspectRatio =
-      1.f;            // Ratio between the width and the height of the image
-  float _near = 0.1f; // Distance before which geometry is excluded from the
-                      // rasterization process
-  float _far = 10.f;  // Distance after which the geometry is excluded fromt he
-                      // rasterization process
+  vec3 eye;
+  vec3 at;
+  vec3 up;
+  float fov;
+  float near = 0.01;
+  float far = 100000;
+  CamType t = PERSPECTIVE;
+  vec3 moving_speed = {.01, .01, .005};
 };
-
-#endif // CAMERA_H

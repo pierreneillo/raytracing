@@ -156,7 +156,7 @@ struct Hit {
 };
 
 // ##############
-// #  Interval  #
+// #  Interval  #__
 // ##############
 
 struct Interval {

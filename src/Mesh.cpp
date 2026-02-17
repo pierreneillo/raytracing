@@ -51,7 +51,7 @@ void Mesh::init(GLuint vao) {
   glCreateBuffers(1, &m_normalVbo);
   glBindBuffer(GL_ARRAY_BUFFER, m_normalVbo);
   glNamedBufferStorage(
-      m_normalVbo, vertexBufferSize, m_vertexNormals.data(),
+      m_normalVbo, m_vertexNormals.size(), m_vertexNormals.data(),
       GL_DYNAMIC_STORAGE_BIT); // Create a data storage on the GPU and fill it
                                // from a CPU array
   glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(GLfloat), 0);

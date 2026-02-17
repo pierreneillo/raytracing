@@ -1,11 +1,12 @@
-#version 450 core
-
-layout(location = 0) in vec3 vPosition;
-layout(location = 3) in vec2 vTexCoord;
+#version 460 core
 
 out vec2 fTexCoord;
 
 void main() {
-  fTexCoord = vTexCoord;
-  gl_Position = vec4(vPosition, 1.0);
+  float x = float((gl_VertexID & 1) << 2);
+  float y = float((gl_VertexID & 2) << 1);
+
+  fTexCoord = vec2(x * 0.5, y * 0.5);
+
+  gl_Position = vec4(x - 1.0, y - 1.0, 0.0, 1.0);
 }

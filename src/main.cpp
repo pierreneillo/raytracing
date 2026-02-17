@@ -1,630 +1,276 @@
-// ----------------------------------------------------------------------------
-// main.cpp
-//
-//  Created on: Wed Oct 21 11:32:52 2020
-//      Author: Kiwon Um (originally designed by Tamy Boubekeur)
-//        Mail: kiwon.um@telecom-paris.fr
-//
-// Description: IGR202 - Practical - Shadow (DO NOT distribute!)
-//
-// http://www.opengl-tutorial.org/intermediate-tutorials/tutorial-16-shadow-mapping/
-//
-// Copyright 2020 Kiwon Um and Tamy Boubekeur
-//
-// The copyright to the computer program(s) herein is the property of Kiwon Um.
-// The program(s) may be used and/or copied only with the written permission of
-// Kiwon Um or in accordance with the terms and conditions stipulated in the
-// agreement/contract under which the program(s) have been supplied.
-// ----------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------
-//
-//  Adapted for educational purposes
-//  Author : Pierre Neillo
-//  Mail : pierre.neillo@telecom-paris.fr
-//
-// ----------------------------------------------------------------------------
-
-#define _USE_MATH_DEFINES
-
-#include <glad/glad.h>
-
-#include <GLFW/glfw3.h>
-
-#include <glm/ext.hpp>
-#include <glm/ext/matrix_transform.hpp>
-#include <glm/glm.hpp>
-#include <glm/gtc/quaternion.hpp>
-#include <glm/gtx/string_cast.hpp>
-
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <exception>
-#include <fstream>
-#include <iostream>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "Camera.hpp"
 #include "Error.hpp"
-#include "Mesh.hpp"
-#include "Scene.hpp"
-#include "ShaderProgram.hpp"
+#include "Utils.hpp"
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include <cstddef>
+#include <cstdio>
+#include <driver_types.h>
+#include <glm/fwd.hpp>
+#include <glm/matrix.hpp>
 
-#define RAYTRACING
+Camera *camPtr = nullptr;
 
-const std::string DEFAULT_MESH_FILENAME("data/rhino2.off");
-std::vector<std::shared_ptr<Mesh>> meshes = {};
+cudaGraphicsResource *current_pos_buffer;
 
-// window parameters
-GLFWwindow *g_window = nullptr;
-int g_windowWidth = 1024;
-int g_windowHeight = 768;
-int texture_upscale = 1;
-int texture_downscale = 4;
+// *****************
+// *  Shader mgmt  *
+// *****************
 
-int textureWidth = g_windowWidth * texture_upscale / texture_downscale;
+GLuint compileShader(GLenum type, const std::string src) {
+  // std::cout << "Compiling from shader source '" << src << "'" << std::endl;
+  GLuint s = glCreateShader(type);
 
-int textureHeight = g_windowHeight * texture_upscale / texture_downscale;
+  std::ifstream input(src.c_str());
+  if (!input)
+    throw std::ios_base::failure("Cannot open source");
 
-// pointer to the current camera model
-std::shared_ptr<Camera> g_cam;
+  std::stringstream buffer;
+  buffer << input.rdbuf();
+  std::string src_string = buffer.str();
+  if (src_string.empty()) {
+    std::cerr << "Source is empty" << std::endl;
+    glDeleteShader(s);
+    return -1;
+  }
+  const GLchar *src_string_gl = (const GLchar *)src_string.c_str();
+  glShaderSource(s, 1, &src_string_gl, nullptr);
+  glCompileShader(s);
 
-// Two-program system for ray-tracing
-std::shared_ptr<ShaderProgram> texturePrinterShader;
-std::shared_ptr<RayTracer> rayTracer;
-
-// Quad mesh to put the texture on
-std::shared_ptr<Object> screenQuad;
-
-// camera control variables
-// to update based on the mesh size, so that navigation runs at scale
-float g_meshScale = 2.0;
-bool g_rotatingP = false;
-bool g_panningP = false;
-bool g_zoomingP = false;
-double g_baseX = 0.0, g_baseY = 0.0;
-glm::vec3 g_baseTrans(0.0);
-glm::vec3 g_baseRot(0.0);
-
-// timer
-float g_appTimer = 0.0;
-float g_appTimerLastColckTime;
-bool g_appTimerStoppedP = true;
-
-// TODO: textures
-unsigned int g_availableTextureSlot = 0;
-
-GLuint loadTextureFromFileToGPU(const std::string &filename) {
-  int width, height, numComponents;
-  // Loading the image in CPU memory using stbd_image
-  unsigned char *data =
-      stbi_load(filename.c_str(), &width, &height,
-                &numComponents, // 1 for a 8 bit greyscale image, 3 for 24bits
-                                // RGB image, 4 for 32bits RGBA image
-                0);
-
-  // Create a texture in GPU memory
-  GLuint texID;
-  glGenTextures(1, &texID);
-  glBindTexture(GL_TEXTURE_2D, texID);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                  GL_LINEAR_MIPMAP_LINEAR);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-  // Uploading the image data to GPU memory
-  glTexImage2D(
-      GL_TEXTURE_2D, 0,
-      (numComponents == 1   ? GL_R8
-       : numComponents == 3 ? GL_RGB8
-                            : GL_RGBA8), // For greyscale images, we store them
-                                         // in the RED channel
-      width, height, 0,
-      (numComponents == 1 ? GL_RED
-       : numComponents == 3
-           ? GL_RGB
-           : GL_RGBA), // For greyscale images, we store them in the RED channel
-      GL_UNSIGNED_BYTE, data);
-
-  // Generating mipmaps for filtered texture fetch
-  glGenerateMipmap(GL_TEXTURE_2D);
-
-  // Freeing the now useless CPU memory
-  stbi_image_free(data);
-  glBindTexture(GL_TEXTURE_2D, 0); // unbind the texture
-  return texID;
+  GLint ok;
+  glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+  if (!ok) {
+    char log[1024];
+    glGetShaderInfoLog(s, 1024, nullptr, log);
+    printf("Shader error:\n%s\n", log);
+  }
+  return s;
 }
 
-// useful for debug
-unsigned int cameraLightPos = 0;
+GLuint createBasicProgram() {
+  GLuint program = glCreateProgram();
+  GLuint vs = compileShader(GL_VERTEX_SHADER, "src/basic.vert");
+  GLuint fs = compileShader(GL_FRAGMENT_SHADER, "src/basic.frag");
 
-void Scene::render() {
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
 
-  glCullFace(GL_BACK);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
-  glViewport(0, 0, g_windowWidth, g_windowHeight);
-  glClear(GL_COLOR_BUFFER_BIT |
-          GL_DEPTH_BUFFER_BIT); // Erase the color and z buffers.
-
-  texturePrinterShader->use();
-
-  // camera
-  texturePrinterShader->set("camPos", g_cam->getPosition());
-  texturePrinterShader->set("viewMat", g_cam->computeViewMatrix());
-  texturePrinterShader->set("projMat", g_cam->computeProjectionMatrix());
-
-  // lights
-  for (int i = 0; i < lights.size(); ++i) {
-    Light &light = lights[i];
-
-    std::string prefix = "lightSources[" + std::to_string(i) + "].";
-    texturePrinterShader->set(prefix + "position", light.position);
-    texturePrinterShader->set(prefix + "color", light.color);
-    texturePrinterShader->set(prefix + "intensity", light.intensity);
-    texturePrinterShader->set(prefix + "isActive", 1);
-  }
-
-  for (const auto &o : objects) {
-    o->render(texturePrinterShader);
-  }
-  // // back-wall
-  // mainShader->set(
-  //     "material.albedo",
-  //     glm::vec3(0.29, 0.51,
-  //               0.82)); // default value if the texture was not loaded
-  // mainShader->set("material.uses_texture", 1);
-  // mainShader->set("modelMat", planeMat);
-  // mainShader->set("normMat", glm::mat3(glm::inverseTranspose(planeMat)));
-  // // Bind the plane normal and color textures to texture units and set
-  // sampler
-  // // uniforms Use texture units that avoid conflict with shadow map units
-  // // (which start from 0)
-  // const int planeColorUnit = 9;
-  // const int planeNormalUnit = 8;
-  // glActiveTexture(GL_TEXTURE0 + planeNormalUnit);
-  // glBindTexture(GL_TEXTURE_2D, planeNormalMap);
-  // glActiveTexture(GL_TEXTURE0 + planeColorUnit);
-  // glBindTexture(GL_TEXTURE_2D, planeColorMap);
-  // mainShader->set("material.normalMap", planeNormalUnit);
-  // mainShader->set("material.colorMap", planeColorUnit);
-  // plane->render();
-
-  // // floor
-  // mainShader->set("material.albedo", glm::vec3(0.8, 0.8, 0.9));
-  // mainShader->set("material.uses_texture", 0);
-  // mainShader->set("modelMat", floorMat);
-  // mainShader->set("normMat", glm::mat3(glm::inverseTranspose(floorMat)));
-  // plane->render();
-
-  // // rhino
-  // mainShader->set("material.albedo", glm::vec3(1, 0.71, 0.29));
-  // mainShader->set("material.uses_texture", 0);
-  // mainShader->set("modelMat", rhinoMat);
-  // mainShader->set("normMat", glm::mat3(glm::inverseTranspose(rhinoMat)));
-  // rhino->render();
-
-  texturePrinterShader->stop();
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+  return program;
 }
 
-Scene g_scene;
+// ***************
+// *  Callbacks  *
+// ***************
+
+void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
+  glViewport(0, 0, width, height);
+  w = width;
+  h = height;
+  aspect = (float)width / (float)height;
+}
 
 void printHelp() {
-  std::cout << "> Help:" << std::endl
-            << "    Mouse commands:" << std::endl
-            << "    * Left button: rotate camera" << std::endl
-            << "    * Middle button: zoom" << std::endl
-            << "    * Right button: pan camera" << std::endl
-            << "    Keyboard commands:" << std::endl
-            << "    * H: print this help" << std::endl
-            << "    * T: toggle animation" << std::endl
-            << "    * S: save shadow maps into PPM files" << std::endl
-            << "    * F1: toggle wireframe/surface rendering" << std::endl
-            << "    * ESC: quit the program" << std::endl;
+  std::cout << "Help : " << std::endl
+            << "\tEsc, W\tQuit the application" << std::endl;
 }
 
-// Executed each time the window is resized. Adjust the aspect ratio and the
-// rendering viewport to the current window.
-void windowSizeCallback(GLFWwindow *window, int width, int height) {
-  g_windowWidth = width;
-  g_windowHeight = height;
-  g_cam->setAspectRatio(static_cast<float>(width) / static_cast<float>(height));
-  glViewport(0, 0, (GLint)width,
-             (GLint)height); // Dimension of the rendering region in the window
-}
-
-// Executed each time a key is entered.
 void keyCallback(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
   if (action == GLFW_PRESS && key == GLFW_KEY_H) {
     printHelp();
-  } else if (action == GLFW_PRESS && key == GLFW_KEY_T) {
-    g_appTimerStoppedP = !g_appTimerStoppedP;
-    if (!g_appTimerStoppedP)
-      g_appTimerLastColckTime = static_cast<float>(glfwGetTime());
-  } else if (action == GLFW_PRESS && key == GLFW_KEY_F1) {
-    GLint mode[2];
-    glGetIntegerv(GL_POLYGON_MODE, mode);
-    glPolygonMode(GL_FRONT_AND_BACK, mode[1] == GL_FILL ? GL_LINE : GL_FILL);
-  } else if (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE) {
-    glfwSetWindowShouldClose(
-        window, true); // Closes the application if the escape key is pressed
+  } else if ((action == GLFW_PRESS && key == GLFW_KEY_A) ||
+             (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)) {
+    glfwSetWindowShouldClose(window, true);
   }
 }
 
-// Called each time the mouse cursor moves
-void cursorPosCallback(GLFWwindow *window, double xpos, double ypos) {
-  int width, height;
-  glfwGetWindowSize(window, &width, &height);
-  const float normalizer = static_cast<float>((width + height) / 2.);
-  const float dx = static_cast<float>((g_baseX - xpos) / normalizer);
-  const float dy = static_cast<float>((ypos - g_baseY) / normalizer);
-  if (g_rotatingP) {
-    const glm::vec3 dRot(-dy * M_PI, dx * M_PI, 0.0);
-    g_cam->setRotation(g_baseRot + dRot);
-  } else if (g_panningP) {
-    g_cam->setPosition(g_baseTrans + g_meshScale * glm::vec3(dx, dy, 0.0));
-  } else if (g_zoomingP) {
-    g_cam->setPosition(g_baseTrans + g_meshScale * glm::vec3(0.0, 0.0, dy));
+void cursorPositionCallback(GLFWwindow *window, double posx, double posy) {
+  if (moving) {
+    if (camPtr)
+      camPtr->rotate(vec2({posx, posy}) - moveOrigin);
+    moveOrigin = {posx, posy};
   }
 }
 
-// Called each time a mouse button is pressed
 void mouseButtonCallback(GLFWwindow *window, int button, int action, int mods) {
-  if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
-    if (!g_rotatingP) {
-      g_rotatingP = true;
-      glfwGetCursorPos(window, &g_baseX, &g_baseY);
-      g_baseRot = g_cam->getRotation();
+  if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
+    if (action == GLFW_PRESS) {
+      moving = true;
+      double xpos, ypos;
+      glfwGetCursorPos(window, &xpos, &ypos);
+      moveOrigin = {xpos, ypos};
+    } else if (action == GLFW_RELEASE) {
+      moving = false;
     }
-  } else if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
-    g_rotatingP = false;
-  } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
-    if (!g_panningP) {
-      g_panningP = true;
-      glfwGetCursorPos(window, &g_baseX, &g_baseY);
-      g_baseTrans = g_cam->getPosition();
-    }
-  } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_RELEASE) {
-    g_panningP = false;
-  } else if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_PRESS) {
-    if (!g_zoomingP) {
-      g_zoomingP = true;
-      glfwGetCursorPos(window, &g_baseX, &g_baseY);
-      g_baseTrans = g_cam->getPosition();
-    }
-  } else if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_RELEASE) {
-    g_zoomingP = false;
   }
 }
 
-void initGLFW() {
-  // Initialize GLFW, the library responsible for window management
-  if (!glfwInit()) {
-    std::cerr << "ERROR: Failed to init GLFW" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
+void scrollCallback(GLFWwindow *window, double xoffset, double yoffset) {
+  if (camPtr)
+    camPtr->zoomin(yoffset);
+}
 
-  // Before creating the window, set some option flags
+/*Init OpenGL, GLFW and glad*/
+int initGLX() {
+  // Initialize GLFW
+  if (!glfwInit())
+    return -1;
+
+  // Setup window with parameters
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
   glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-  glfwWindowHint(GLFW_RESIZABLE, GL_TRUE);
 
-  // Create the window
-  g_window = glfwCreateWindow(g_windowWidth, g_windowHeight, "Final Project",
-                              nullptr, nullptr);
-  if (!g_window) {
-    std::cerr << "ERROR: Failed to open window" << std::endl;
+  // Setup debug
+
+  // Create window
+  window = glfwCreateWindow(1920, 1080, "Raytracing", NULL, NULL);
+  if (!window) {
     glfwTerminate();
-    std::exit(EXIT_FAILURE);
+    return -1;
   }
+  glfwMakeContextCurrent(window);
+  glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+  glfwSetKeyCallback(window, keyCallback);
 
-  // Load the OpenGL context in the GLFW window using GLAD OpenGL wrangler
-  glfwMakeContextCurrent(g_window);
+  glfwSetCursorPosCallback(window, cursorPositionCallback);
+  glfwSetMouseButtonCallback(window, mouseButtonCallback);
+  glfwSetScrollCallback(window, scrollCallback);
 
-  // not mandatory for all, but MacOS X
-  glfwGetFramebufferSize(g_window, &g_windowWidth, &g_windowHeight);
-
-  // Connect the callbacks for interactive control
-  glfwSetWindowSizeCallback(g_window, windowSizeCallback);
-  glfwSetKeyCallback(g_window, keyCallback);
-  glfwSetCursorPosCallback(g_window, cursorPosCallback);
-  glfwSetMouseButtonCallback(g_window, mouseButtonCallback);
-}
-
-void clear();
-
-void exitOnCriticalError(const std::string &message) {
-  std::cerr << "> [Critical error]" << message << std::endl;
-  std::cerr << "> [Clearing resources]" << std::endl;
-  clear();
-  std::cerr << "> [Exit]" << std::endl;
-  std::exit(EXIT_FAILURE);
-}
-
-void initOpenGL() {
-  // Load extensions for modern OpenGL
-  if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-    exitOnCriticalError("[Failed to initialize OpenGL context]");
-
-  glEnable(GL_DEBUG_OUTPUT);             // Modern error callback functionality
-  glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS); // For recovering the line where the
-                                         // error occurs, set a debugger
-                                         // breakpoint in DebugMessageCallback
-  glDebugMessageCallback(
-      debugMessageCallback,
-      0); // Specifies the function to call when an error message is generated.
-
-  glCullFace(GL_BACK);    // Specifies the faces to cull (here the ones pointing
-                          // away from the camera)
-  glEnable(GL_CULL_FACE); // Enables face culling (based on the orientation
-                          // defined by the CW/CCW enumeration).
-  glDepthFunc(GL_LESS);   // Specify the depth test for the z-buffer
-  glEnable(GL_DEPTH_TEST); // Enable the z-buffer test in the rasterization
-  glClearColor(1.0f, 1.0f, 1.0f, 1.0f); // specify the background color, used
-                                        // any time the framebuffer is cleared
-
-  // Loads and compile the programmable shader pipeline
-  try {
-#ifdef RAYTRACING
-    rayTracer = RayTracer::genComputeShaderProgram("src/raytracer.comp");
-    rayTracer->stop();
-#endif
-    texturePrinterShader = ShaderProgram::genBasicShaderProgram(
-        "src/basic.vert", "src/basic.frag");
-    texturePrinterShader->stop();
-
-  } catch (std::exception &e) {
-    exitOnCriticalError(std::string("[Error loading shader program]") +
-                        e.what());
+  // Initialize GLAD
+  if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+    std::cout << "Failed to initialize GLAD" << std::endl;
+    return -1;
   }
+  glDebugMessageCallback(debugMessageCallback, 0);
+  return 0;
 }
 
-void initScene(const std::string &meshFilename) {
-  // Init camera
-  int width, height;
-  glfwGetWindowSize(g_window, &width, &height);
-  g_cam = std::make_shared<Camera>();
-  g_cam->setAspectRatio(static_cast<float>(width) / static_cast<float>(height));
-
-  // Load meshes in the scene
-
-  // Extra simple scene
-  // std::shared_ptr<Mesh> mesh = std::make_shared<Mesh>(Mesh(
-  //     {
-  //         {0, 1, 0},
-  //         {-1, -.5, 0},
-  //         {1, -.5, 0},
-  //     },
-  //     std::vector(3, glm::vec3(0, 0, 1)), {0, 1, 2}));
-  // g_scene.objects.push_back(std::make_shared<Object>(
-  //     mesh, std::make_shared<PhongMaterial>(glm::vec3(1., 0., 0.))));
-
-  // std::shared_ptr<Mesh> mesh2 = std::make_shared<Mesh>(Mesh(
-  //     {
-  //         {0, 1, 0},
-  //         {1, .5, 0},
-  //         {2, -.5, -.5},
-  //     },
-  //     std::vector(3, glm::vec3(0, 0, 1)), {0, 1, 2}));
-  // g_scene.objects.push_back(std::make_shared<Object>(
-  //     mesh2, std::make_shared<PhongMaterial>(glm::vec3(0., 1., 0.))));
-
-  // Sphere
-  std::shared_ptr<Mesh> sp = std::make_shared<Mesh>(Mesh::genSphere(16));
-
-  g_scene.objects.push_back(std::make_shared<Object>(
-      sp, std::make_shared<PhongMaterial>(glm::vec3(1., 0., 0.))));
-
-  // Complicated scene
-
-  // std::shared_ptr<Mesh> rhino;
-  // try {
-  //   rhino = std::make_shared<Mesh>(Mesh::fromOFF(meshFilename));
-  // } catch (std::exception &e) {
-  //   exitOnCriticalError(std::string("[Error loading mesh]") + e.what());
-  // }
-
-  // meshes.push_back(rhino);
-
-  // g_scene.objects.push_back(std::make_shared<Object>(
-  //     rhino,
-  //     std::make_shared<PhongMaterial>(glm::vec3({.44f, .42f, .5f}), 10)));
-  // g_scene.objects.push_back(std::make_shared<Object>(
-  //     Mesh::genPlane(), std::make_shared<PhongMaterial>()));
-  // g_scene.objects[1]->translate({0, -1, 0});
-  // g_scene.objects.push_back(std::make_shared<Object>(
-  //     Mesh::genPlane(), std::make_shared<PhongMaterial>(glm::vec3({0, 0,
-  //     1}))));
-  // g_scene.objects[2]->translate({0, 0, -1});
-  // g_scene.objects[2]->rotate((float)(.5f * M_PI), glm::vec3(1.0, 0.0, 0.0));
-
-  // TODO : Handle textures and normals
-  // try {
-  //   g_scene.planeNormalMap = loadTextureFromFileToGPU("data/normal.png");
-  //   std::cout << "Texture ID saved : " << g_scene.planeNormalMap <<
-  //   std::endl;
-  // } catch (std::exception &e) {
-  //   exitOnCriticalError(std::string("[Error loading normal map]") +
-  //   e.what());
-  // }
-
-  // try {
-  //   g_scene.planeColorMap = loadTextureFromFileToGPU("data/color.png");
-  //   std::cout << "Texture ID saved : " << g_scene.planeColorMap << std::endl;
-  // } catch (std::exception &e) {
-  //   exitOnCriticalError(std::string("[Error loading color map]") + e.what());
-  // }
-
-  // Setup lights
-  const std::vector<glm::vec3> pos = {
-      glm::vec3(0.0, 2.0, 1.0) * .8f,
-      glm::vec3(0.3, -1.5, 1.4),
-      glm::vec3(2.0, 0.5, -0.2) * .8f,
+int main() {
+  setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
+  setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
+  if (initGLX()) {
+    return -1;
   };
-  const std::vector<glm::vec3> col = {
-      glm::vec3(1.0, 1.0, 1.0),
-      glm::vec3(1.0, 1.0, 0.8),
-      glm::vec3(1.0, 1.0, 0.8),
+
+  // Compile Shaders and create program
+  program = createBasicProgram();
+
+  static Camera cam =
+      Camera(real3(0, 0, 1. / glm::atan(glm::radians(22.5))) + .5,
+             real3(0, 0, 0), real3(0, 1, 0), 45.f);
+
+  camPtr = &cam;
+
+  RCamera rcam = {cam.eye, cam.at, cam.up, cam.fov, cam.near, cam.far, aspect};
+
+  // Temporary setup
+  LightSource lights[3] = {
+      {real3(0., 2., 0.), 1.f, real3(1., 1., 1.), true},
+      {real3(2., .5, -.2), .5f, real3(1., 1., .8), true},
+      {real3(2., -1., 0.), .5f, real3(1., .8, .3), true},
+
   };
-  for (int i = 0; i < pos.size(); ++i) {
-    g_scene.lights.push_back(Light());
-    Light &a_light = g_scene.lights[g_scene.lights.size() - 1];
-    a_light.position = pos[i];
-    a_light.color = col[i];
-    a_light.intensity = 0.5f;
-  }
 
-  for (auto &o : g_scene.objects) {
-    o->init();
-  }
+  // Sphere of radius r and center C
+  Sphere s = {real3(), 1};
+  // Red material for the sphere
+  Material sphereMat = {
+      real3(1, 0, 0), .1, real3(1, 0, 0), .96, real3(1, 1, 1), .04, 32.,
+      PHONG_MATERIAL};
+  Material planeMat = {
+      real3(1., 1., 1.), .0, real3(1., 1., 1.), .5, real3(1, 1, 1), .7, 32.,
+      PHONG_MATERIAL};
 
-  // Adjust the camera to the mesh
-  glm::vec3 meshCenter;
-  float meshRadius;
-  g_scene.objects[0]->mesh->computeBoundingSphere(&meshCenter, &meshRadius);
-  g_scene.scene_center = meshCenter;
-  g_scene.scene_radius = meshRadius;
-  g_meshScale = g_scene.scene_radius / 2.;
-  g_cam->setPosition(g_scene.scene_center +
-                     glm::vec3(0.0, 0.0, 3.0 * g_meshScale));
-  g_cam->setNear(g_meshScale / 100.f);
-  g_cam->setFar(6.0 * g_meshScale);
+  Object st = {
+      sphereMat,
+      TRIANGLE,
+      {.triangleMesh = genSphere(4)},
+      8 * 4 * 4,
+      {
+          {-1, -1, -1},
+          {1, 1, 1},
+      },
 
-  // Create a quad to map the computed screen on
-  screenQuad = std::make_shared<Object>(Mesh::genPlane(),
-                                        std::make_shared<EmptyMaterial>());
-  screenQuad->init();
-}
+  };
+  Object so = {sphereMat, SPHERE, {&s}, 1, {{-1, -1, -1}, {1, 1, 1}}};
+  float pS = 3;
+  real3 planeVertices[4] = {
+      {-pS, -1, -pS},
+      {-pS, -1, pS},
+      {pS, -1, pS},
+      {pS, -1, -pS},
+  };
+  real3 planeNormals[4] = {
+      {0, 1, 0},
+      {0, 1, 0},
+      {0, 1, 0},
+      {0, 1, 0},
+  };
+  size_t planeTris[6] = {0, 1, 2, 0, 2, 3};
+  Object plane = {planeMat,
+                  TRIANGLE,
+                  {.triangleMesh =
+                       {
+                           planeVertices,
+                           planeNormals,
+                           4,
+                           planeTris,
+                       }},
+                  2,
+                  {{-1, -1, -1}, {1, -1, 1}}};
+  Object objects[2] = {so, plane};
 
-void init(const std::string &meshFilename) {
-  initGLFW();              // Windowing system
-  initOpenGL();            // OpenGL Context and shader pipeline
-  initScene(meshFilename); // Actual g_scene to render
-}
+  GLuint vao;
+  glCreateVertexArrays(1, &vao);
+  glBindVertexArray(vao);
 
-void clear() {
-  g_cam.reset();
-  texturePrinterShader.reset();
-  glfwDestroyWindow(g_window);
-  glfwTerminate();
-}
-
-// The main rendering call
-void render() {
-  rayTracer->genSSBOs(g_scene);
-  rayTracer->setUniforms(g_cam);
-  rayTracer->dispatchCompute(GL_WRITE_ONLY);
-  glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-  texturePrinterShader->use();
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, rayTracer->tex_id());
-  texturePrinterShader->set("screenTexture", 0);
-  glDisable(GL_CULL_FACE);
-  glDisable(GL_DEPTH_TEST);
-  screenQuad->render(texturePrinterShader);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glEnable(GL_DEPTH_TEST);
-  glEnable(GL_CULL_FACE);
-}
 
-// Update any accessible variable based on the current time
-void update(float currentTime) {
-  if (!g_appTimerStoppedP) {
-    // Animate any entity of the program here
-    float dt = currentTime - g_appTimerLastColckTime;
-    g_appTimerLastColckTime = currentTime;
-    g_appTimer += dt;
-    // <---- Update here what needs to be animated over time ---->
+  int iw, ih;
+  glfwGetFramebufferSize(window, &iw, &ih);
+  w = iw;
+  h = ih;
+  aspect = (float)w / (float)h;
 
-    g_scene.objects[0]->rotate((float)g_appTimer, glm::vec3(0.f, 1.f, 0.f));
-  }
-}
+  float4 *h_framebuffer = (float4 *)malloc(sizeof(float4) * w * h);
+  GLuint texture;
+  glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+  glTextureStorage2D(texture, 1, GL_RGBA32F, w, h);
+  glUseProgram(program);
+  glBindTextureUnit(0, texture);
 
-void usage(const char *command) {
-  std::cerr << "Usage : " << command << " [<file.off>]" << std::endl;
-  std::exit(EXIT_FAILURE);
-}
+  init_raytracing(rcam, lights, 3, objects, 2, h_framebuffer);
 
-void printWorkGroupsCapabilities() {
-  int workgroup_count[3];
-  int workgroup_size[3];
-  int workgroup_invocations;
+  while (!glfwWindowShouldClose(window)) {
+    rcam.eye = cam.eye;
+    rcam.aspect = aspect;
+    updateCamera(rcam);
+    std::cout << w << ", " << h << std::endl;
+    float last_t = glfwGetTime();
+    raytrace(h_framebuffer);
+    float delta = glfwGetTime() - last_t;
+    std::cout << "Raytracing time : " << delta << std::endl;
 
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &workgroup_count[0]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &workgroup_count[1]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 2, &workgroup_count[2]);
+    glTextureSubImage2D(texture, 0, 0, 0, iw, ih, GL_RGBA, GL_FLOAT,
+                        h_framebuffer);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-  printf("Taille maximale des workgroups:\n\tx:%u\n\ty:%u\n\tz:%u\n",
-         workgroup_count[0], workgroup_count[1], workgroup_count[2]);
+    glUseProgram(program);
+    glBindTextureUnit(0, texture);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 0, &workgroup_size[0]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1, &workgroup_size[1]);
-  glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2, &workgroup_size[2]);
-
-  printf("Nombre maximal d'invocation locale:\n\tx:%u\n\ty:%u\n\tz:%u\n",
-         workgroup_size[0], workgroup_size[1], workgroup_size[2]);
-
-  glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &workgroup_invocations);
-  printf("Nombre maximum d'invocation de workgroups:\n\t%u\n",
-         workgroup_invocations);
-}
-
-void saveTextureToPPM(GLuint textureID, int width, int height,
-                      const std::string &filename) {
-  std::vector<float> pixels(width * height * 4);
-  glBindTexture(GL_TEXTURE_2D, textureID);
-  glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, pixels.data());
-  glBindTexture(GL_TEXTURE_2D, 0);
-
-  std::ofstream out(filename.c_str(), std::ios::binary);
-  if (!out) {
-    std::cerr << "Cannot open file " << filename << " for writing" << std::endl;
-    return;
-  }
-  out << "P6\n" << width << " " << height << "\n255\n";
-  for (int y = height - 1; y >= 0; --y) {
-    for (int x = 0; x < width; ++x) {
-      int i = (y * width + x) * 4;
-      unsigned char r = static_cast<unsigned char>(
-          std::min(1.0f, std::max(0.0f, pixels[i + 0])) * 255.0f);
-      unsigned char g = static_cast<unsigned char>(
-          std::min(1.0f, std::max(0.0f, pixels[i + 1])) * 255.0f);
-      unsigned char b = static_cast<unsigned char>(
-          std::min(1.0f, std::max(0.0f, pixels[i + 2])) * 255.0f);
-      out.write(reinterpret_cast<const char *>(&r), 1);
-      out.write(reinterpret_cast<const char *>(&g), 1);
-      out.write(reinterpret_cast<const char *>(&b), 1);
-    }
-  }
-  out.close();
-  std::cout << " > Texture saved to " << filename << std::endl;
-}
-
-int main(int argc, char **argv) {
-  if (argc > 2)
-    usage(argv[0]);
-  // Your initialization code (user interface, OpenGL states, scene with
-  // geometry, material, lights, etc)
-  init(argc == 1 ? DEFAULT_MESH_FILENAME : argv[1]);
-  rayTracer->genComputeTextureImage(textureWidth, textureHeight);
-  render();
-  saveTextureToPPM(rayTracer->tex_id(), textureWidth, textureHeight,
-                   "output.ppm");
-  while (!glfwWindowShouldClose(g_window)) {
-    update(static_cast<float>(glfwGetTime()));
-    render();
-    glfwSwapBuffers(g_window);
+    glfwSwapBuffers(window);
     glfwPollEvents();
   }
-  clear();
-  std::cout << " > Quit" << std::endl;
-  return EXIT_SUCCESS;
+  glDeleteVertexArrays(1, &vao);
+  glDeleteProgram(program);
+  end_raytracing();
+  glfwTerminate();
+
+  return 0;
 }
