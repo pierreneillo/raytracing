@@ -85,6 +85,31 @@ struct Object {
   size_t nPrimitives;
   AABB bb;
 
+  __host__ __device__ Object(Material mat, Sphere *spheres, size_t nPrimitives)
+      : mat(mat), data({.spheres = spheres}), nPrimitives(nPrimitives) {
+    real3 mini = spheres[0].C;
+    real3 maxi = spheres[0].C;
+    for (int i = 0; i < nPrimitives; i++) {
+      Sphere s = spheres[i];
+      mini = vmin(mini, s.C - s.r);
+      maxi = vmax(maxi, s.C + s.r);
+    }
+    bb = {mini, maxi};
+    type = SPHERE;
+  }
+
+  __host__ __device__ Object(Material mat, TriangleMesh tM, size_t nPrimitives)
+      : mat(mat), data({.triangleMesh = tM}), nPrimitives(nPrimitives) {
+    real3 mini = tM.vertices[0];
+    real3 maxi = tM.vertices[0];
+    for (int i = 0; i < tM.nVerts; i++) {
+      mini = vmin(mini, tM.vertices[i]);
+      maxi = vmax(maxi, tM.vertices[i]);
+    }
+    bb = {mini, maxi};
+    type = TRIANGLE;
+  }
+
   __device__ Triangle buildTriangle(size_t k) {
     if (k < nPrimitives) {
       size_t j = 3 * k;

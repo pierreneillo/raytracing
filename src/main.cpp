@@ -2,11 +2,15 @@
 #include "Error.hpp"
 #include "Utils.hpp"
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "../dep/tiny_obj_loader.hpp"
 #include <cstddef>
 #include <cstdio>
 #include <driver_types.h>
+#include <fstream>
 #include <glm/fwd.hpp>
 #include <glm/matrix.hpp>
+#include <string>
 
 Camera *camPtr = nullptr;
 
@@ -192,13 +196,67 @@ Object makePlane(real3 centerPos, real size, int axis, Material planeMat) {
   for (int i = 0; i < 4; i++)
     norms[i] = glm::vec3(normalModel * glm::vec4(glm::vec3(norms[i]), 1.));
 
-  Object plane = {planeMat,
-                  TRIANGLE,
-                  {.triangleMesh = {verts, norms, 4, indices}},
-                  2,
-                  {centerPos - size, centerPos + size}};
+  Object plane = Object(planeMat, {verts, norms, 4, indices}, 2);
 
   return plane;
+}
+
+TriangleMesh loadMesh(std::string filename, int &nTriangles) {
+  // Wrapper to the tinyobjloader
+  tinyobj::ObjReaderConfig reader_config;
+  tinyobj::ObjReader reader;
+
+  if (!reader.ParseFromFile(filename, reader_config)) {
+    std::cerr << "There was an error while loading mesh '" << filename << "'"
+              << std::endl;
+    // To prevent error upon mesh loading
+    nTriangles = 0;
+  };
+
+  const tinyobj::attrib_t &attrib = reader.GetAttrib();
+  const std::vector<tinyobj::shape_t> &shapes = reader.GetShapes();
+
+  TriangleMesh t;
+  t.nVerts = attrib.vertices.size() / 3;
+  t.vertices = new real3[t.nVerts];
+  t.normals = new real3[t.nVerts];
+  for (int i = 0; i < t.nVerts; i++) {
+    // We copy data
+    t.vertices[i] = {
+        attrib.vertices[3 * i],
+        attrib.vertices[3 * i + 1],
+        attrib.vertices[3 * i + 2],
+    };
+    // We set the normals at 0 as we will need to average over all the faces
+    t.normals[i] = {0, 0, 0};
+  }
+
+  std::vector<size_t> indexes;
+  for (auto &shape : shapes)
+    for (auto &idx : shape.mesh.indices) {
+      indexes.push_back(idx.vertex_index);
+      // We add the normal if there is one
+      if (idx.normal_index >= 0) {
+        int i = idx.normal_index;
+        real3 localNormal = {
+            attrib.normals[3 * i],
+            attrib.normals[3 * i + 1],
+            attrib.normals[3 * i + 2],
+        };
+        t.normals[idx.vertex_index] += localNormal;
+      }
+    }
+
+  // We normalize the normals
+  for (int i = 0; i < t.nVerts; i++)
+    t.normals[i] = normalized(t.normals[i]);
+
+  // Lastly we copy the triangles in the designated buffer
+  t.triangles = new size_t[indexes.size()];
+  std::copy(indexes.begin(), indexes.end(), t.triangles);
+  nTriangles = indexes.size() / 3;
+
+  return t;
 }
 
 int main() {
@@ -211,7 +269,7 @@ int main() {
   // Compile Shaders and create program
   program = createBasicProgram();
 
-  static Camera cam = Camera(real3(0, 0, 2. / glm::atan(glm::radians(22.5))),
+  static Camera cam = Camera(real3(0, 1, 2. / glm::atan(glm::radians(22.5))),
                              real3(0, 0, 0), real3(0, 1, 0), 45.f);
 
   camPtr = &cam;
@@ -219,7 +277,7 @@ int main() {
   RCamera rcam = {cam.eye, cam.at, cam.up, cam.fov, cam.near, cam.far, aspect};
 
   // Temporary setup
-#define N_LIGHTS 3
+#define N_LIGHTS 2
   LightSource lights[N_LIGHTS] = {
       {real3(0., 3, 0.), 1.f, real3(1., 1., 1.), true},
       {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
@@ -227,45 +285,21 @@ int main() {
 
   };
 
-  // Sphere of radius r and center C
-  Sphere s = {real3(-.5, 0, 0), 1};
-  Sphere s2 = {real3(1, 0, 0), .5};
-  // Red material for the sphere
-  Material sphereMat = {
-      real3(1, 0, 0), .2, real3(1, 0, 0), 1, real3(1, 1, 1), 0, 32.,
-      PHONG_MATERIAL};
-  Material sphereMat2 = {
-      real3(1, 1, 1), .2, real3(1, 0, 0), .5, real3(1, 1, 1), .5, 32.,
-      PHONG_MATERIAL};
-
   Material planeMat = {
-      real3(1., 1., 1.), .1, real3(1., 1., 1.), .1, real3(1, 1, 1), .9, 32.,
+      real3(1., 1., 1.), .1, real3(1., 1., 1.), .9, real3(1, 1, 1), .1, 32.,
       PHONG_MATERIAL};
 
-  Material transparentMat = {
-      real3(1., 1., 1.), 0, real3(1., 1., 1.), 0, real3(1, 1, 1), 1, 32.,
+  Material gobeletMaterial = {
+      real3(1., 1., 1.), .1, real3(1., 1., 1.), 1, real3(1, 1, 1), 0, 32.,
       PHONG_MATERIAL};
 
-  Object st = {
-      sphereMat,
-      TRIANGLE,
-      {.triangleMesh = genSphere(4)},
-      8 * 4 * 4,
-      {
-          {-1, -1, -1},
-          {1, 1, 1},
-      },
-
-  };
-  Object so = {sphereMat, SPHERE, {&s}, 1, {{-1.5, -1, -1}, {.5, 1, 1}}};
-  Object so2 = {sphereMat2, SPHERE, {&s2}, 1, {{.5, -.5, -.5}, {1.5, .5, .5}}};
-#define N_OBJ 6
-  Object objects[N_OBJ] = {so,
-                           so2,
-                           makePlane({0, 0, -2}, 2, 2, transparentMat),
-                           makePlane({0, -2, 0}, 2, 1, transparentMat),
-                           makePlane({-2, 0, 0}, 2, 0, planeMat),
-                           makePlane({2, 0, 0}, 2, 0, planeMat)};
+  // Sphere s = {real3(), 1.};
+  // Object so = Object(planeMat, &s, 1);
+  int nTriangles;
+  TriangleMesh gobeletMesh = loadMesh("data/gobelet.obj", nTriangles);
+  Object gobelet = Object(gobeletMaterial, gobeletMesh, nTriangles);
+#define N_OBJ 2
+  Object objects[N_OBJ] = {makePlane({0, 0, 0}, 4, 1, planeMat), gobelet};
 
   GLuint vao;
   glCreateVertexArrays(1, &vao);
@@ -305,7 +339,7 @@ int main() {
     float last_t = glfwGetTime();
     raytrace(h_framebuffer);
     float delta = glfwGetTime() - last_t;
-    std::cout << "Raytracing time : " << delta << std::endl;
+    printf("%.2f FPS       \r", 1. / delta);
 
     glTextureSubImage2D(texture, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT,
                         h_framebuffer);

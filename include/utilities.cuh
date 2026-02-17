@@ -185,6 +185,14 @@ __device__ __host__ __forceinline__ T clamp(T v, T vmin, T vmax) {
   return max(min(v, vmax), vmin);
 }
 
+__device__ __host__ __forceinline__ real3 vmin(real3 a, real3 b) {
+  return real3(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z));
+}
+
+__device__ __host__ __forceinline__ real3 vmax(real3 a, real3 b) {
+  return real3(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z));
+}
+
 inline __device__ float4 mul(const float *mat, float4 v) {
   // Matrix multiplication function
   float4 result;

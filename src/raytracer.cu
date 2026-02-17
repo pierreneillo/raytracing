@@ -445,7 +445,6 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
 
 void raytrace(float4 *framebuffer) {
   scene.cam.aspect = aspect;
-  printf("W : %d\n", w);
 
   glm::mat4x4 camMat = scene.cam.matrix();
   glm::mat4x4 invCamMat = glm::inverse(camMat);
@@ -558,18 +557,8 @@ int _main() {
       real3(.5, .5, .5), .2, real3(.5, .5, .5), .7, real3(1, 1, 1), .01, 32.,
       PHONG_MATERIAL};
 
-  Object st = {
-      sphereMat,
-      TRIANGLE,
-      {.triangleMesh = genSphere(16)},
-      8 * 16 * 16,
-      {
-          {-1, -1, -1},
-          {1, 1, 1},
-      },
-
-  };
-  Object so = {sphereMat, SPHERE, {&s}, 1, {{-1, -1, -1}, {1, 1, 1}}};
+  Object st = Object(sphereMat, genSphere(16), 8 * 16 * 16);
+  Object so = Object(sphereMat, &s, 1);
   real3 planeVertices[4] = {
       {-1, -1, -1},
       {-1, -1, 1},
@@ -583,17 +572,8 @@ int _main() {
       {0, 1, 0},
   };
   size_t planeTris[6] = {0, 1, 2, 0, 2, 3};
-  Object plane = {planeMat,
-                  TRIANGLE,
-                  {.triangleMesh =
-                       {
-                           planeVertices,
-                           planeNormals,
-                           4,
-                           planeTris,
-                       }},
-                  2,
-                  {{-1, -1, -1}, {1, -1, 1}}};
+  Object plane =
+      Object(planeMat, {planeVertices, planeNormals, 4, planeTris}, 2);
   Object objects[2] = {st, plane};
 
   float4 *h_framebuffer = (float4 *)malloc(sizeof(float4) * w * h);
