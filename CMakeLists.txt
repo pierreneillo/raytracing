@@ -13,6 +13,7 @@ set(CMAKE_CUDA_SEPARABLE_COMPILATION OFF)
 
 add_executable(${PROJECT_NAME}
     src/raytracer.cu
+    src/bvh.cu
     src/Error.cpp
     src/main.cpp
     # src/Mesh.cpp

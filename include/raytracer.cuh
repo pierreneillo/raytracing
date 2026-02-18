@@ -6,8 +6,16 @@ extern float aspect;
 
 extern uint recursion_depth;
 
-#define EPSILON .0001
+// Epsilon used in elemination criteria for parralel rays in triangle
+// intersection
+#define TRIANGLE_EPSILON .0000001
+
+// Epsilon used in elimination criteria for low throughput contribution in
+// recursive raytracing
 #define THROUGHPUT_EPSILON .001
+
+// Maw tree depth for BVH traversal
+#define MAX_TREE_DEPTH 32
 
 inline __device__ void imageStore(float4 *image, uint w, uint2 coords,
                                   float4 value) {
@@ -17,8 +25,9 @@ inline __device__ void imageStore(float4 *image, uint w, uint2 coords,
 struct TriangleMesh {
   real3 *vertices;
   real3 *normals;
-  size_t nVerts;
-  size_t *triangles;
+  index_t nVerts;
+  index_t *triangles;
+  index_t nTriangles;
 };
 
 struct Sphere {
@@ -57,7 +66,47 @@ struct AABB {
 
     return n;
   }
+
+  __host__ __device__ void add(real3 v) {
+    m = vmin(m, v);
+    M = vmax(M, v);
+  }
+
+  __host__ __device__ float area() {
+    real3 e = M - m;
+    return dot(e, e);
+  }
 };
+
+/* BVH Implementation
+ * This BVH Implementation was done following this tuto (thanks to the author)
+ * https://jacco.ompf2.com/2022/04/13/how-to-build-a-bvh-part-1-basics/
+ */
+
+struct BVHNode {
+  AABB bb;
+  index_t left;
+  index_t firstPrimitive, nPrimitives;
+};
+
+// Structure made to stock the objects from the BVH, without moving the
+// original triangle array around
+struct BVHObj {
+  index_t index;
+  real3 centroid;
+};
+
+struct BVH {
+  BVHNode *nodes;
+  BVHObj *objects;
+  index_t nodes_used = 0;
+};
+
+void updateNodeBounds(BVH &b, TriangleMesh &tm, index_t nodeIdx);
+
+void subdivide(BVH &b, TriangleMesh &tm, index_t nodeIdx);
+
+BVH buildBVH(TriangleMesh tm);
 
 enum MaterialType { UNDEF_MATERIAL, PHONG_MATERIAL, PBR_MATERIAL };
 
@@ -82,10 +131,10 @@ struct Object {
     Sphere *spheres;
     TriangleMesh triangleMesh;
   } data;
-  size_t nPrimitives;
-  AABB bb;
+  index_t nPrimitives;
+  BVH b;
 
-  __host__ __device__ Object(Material mat, Sphere *spheres, size_t nPrimitives)
+  __host__ __device__ Object(Material mat, Sphere *spheres, index_t nPrimitives)
       : mat(mat), data({.spheres = spheres}), nPrimitives(nPrimitives) {
     real3 mini = spheres[0].C;
     real3 maxi = spheres[0].C;
@@ -94,11 +143,11 @@ struct Object {
       mini = vmin(mini, s.C - s.r);
       maxi = vmax(maxi, s.C + s.r);
     }
-    bb = {mini, maxi};
+    b = {nullptr, nullptr, 0};
     type = SPHERE;
   }
 
-  __host__ __device__ Object(Material mat, TriangleMesh tM, size_t nPrimitives)
+  __host__ Object(Material mat, TriangleMesh tM, index_t nPrimitives)
       : mat(mat), data({.triangleMesh = tM}), nPrimitives(nPrimitives) {
     real3 mini = tM.vertices[0];
     real3 maxi = tM.vertices[0];
@@ -106,16 +155,16 @@ struct Object {
       mini = vmin(mini, tM.vertices[i]);
       maxi = vmax(maxi, tM.vertices[i]);
     }
-    bb = {mini, maxi};
+    b = buildBVH(tM);
     type = TRIANGLE;
   }
 
-  __device__ Triangle buildTriangle(size_t k) {
+  __device__ Triangle buildTriangle(index_t k) {
     if (k < nPrimitives) {
-      size_t j = 3 * k;
+      index_t j = 3 * k;
       real3 *v = data.triangleMesh.vertices;
       real3 *n = data.triangleMesh.normals;
-      size_t *t = data.triangleMesh.triangles;
+      index_t *t = data.triangleMesh.triangles;
       return {v[t[j]], v[t[j + 1]], v[t[j + 2]],
               n[t[j]], n[t[j + 1]], n[t[j + 2]]};
     }
@@ -145,6 +194,8 @@ struct RCamera {
 TriangleMesh genSphere(const unsigned int resolution);
 
 void updateCamera(RCamera);
+
+void reallocDeviceFramebuffer();
 
 void init_raytracing(RCamera cam, LightSource *lights, int nLights,
                      Object *objects, int nObjects, float4 *framebuffer);

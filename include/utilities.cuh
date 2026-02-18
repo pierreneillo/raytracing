@@ -26,6 +26,7 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 \*********************************************/
 
 typedef float real;
+typedef uint32_t index_t;
 
 struct real3 {
   real x, y, z;

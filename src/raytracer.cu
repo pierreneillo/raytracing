@@ -11,7 +11,7 @@
 uint w = 1920;
 uint h = 1080;
 float aspect = (float)w / (float)h;
-uint recursion_depth = 3;
+uint recursion_depth = 2;
 
 glm::mat4x4 RCamera::matrix() {
   return glm::perspective(glm::radians(fov), aspect, near, far) *
@@ -28,7 +28,8 @@ struct Hit {
   real3 n;         // Normal
   float t;         // Parameter of the ray
   bool front_face; // Tells whether the ray has hit the object from the outside
-  int k;           // Index (or hash) of the hit object
+  int kO;          // Index (or hash) of the hit object
+  int kP;          // Index (or hash) of the hit primitive
 };
 
 // ##############
@@ -101,11 +102,8 @@ struct Ray {
     real3 rxe2 = cross(dir, e2);
     float det = dot(e1, rxe2);
 
-    // if (det > EPSILON)
-    //   return false;
-
     // We consider the ray is parallel
-    if (abs(det) < 0.0001)
+    if (abs(det) < TRIANGLE_EPSILON)
       return false;
 
     float idet = 1.0 / det;
@@ -177,19 +175,65 @@ struct Ray {
     }
   }
 
-  __device__ bool hits(Object o, Interval i, Hit &hit) {
-    Hit idc_hit;
-    if (!hits(o.bb, i, idc_hit))
-      return false;
+  __device__ bool hits(Object o, Interval i, Hit &hit, const int last_kP) {
     bool did_hit = false;
     float closest_now = i.e;
     switch (o.type) {
     case TRIANGLE: {
-      for (int k = 0; k < o.nPrimitives; k++) {
-        Triangle t = o.buildTriangle(k);
-        if (hits(t, Interval(i.s, closest_now), hit)) {
-          did_hit = true;
-          closest_now = hit.t;
+      // BVH Traversal
+      index_t stack[MAX_TREE_DEPTH];
+      index_t stackPtr = 0;
+      stack[stackPtr++] = 0;
+
+      Hit idc_hit;
+      while (stackPtr > 0) {
+        if (stackPtr >= MAX_TREE_DEPTH)
+          printf("Stack depth exceeded\n");
+        int nodeIdx = stack[--stackPtr];
+        // int depth = depthStack[stackPtr];
+        BVHNode &node = o.b.nodes[nodeIdx];
+        // If we didn't hit the box, we directly pass to the next box on the
+        // stack
+        if (!hits(node.bb, Interval(i.s, closest_now), idc_hit))
+          continue;
+
+        // If we did hit we branch depending if the node is a leaf
+        if (node.nPrimitives > 0) {
+          // Leaf node
+          for (int k = node.firstPrimitive;
+               k < node.nPrimitives + node.firstPrimitive; k++) {
+            Triangle t = o.buildTriangle(o.b.objects[k].index);
+            if (k != last_kP && hits(t, Interval(i.s, closest_now), hit)) {
+              did_hit = true;
+              closest_now = hit.t;
+              hit.kP = k;
+            }
+          }
+        } else {
+          // Internal node, we add children to stack
+          // We order the two children nodes to improve performances
+          Hit left_hit;
+          Hit right_hit;
+          if (hits(o.b.nodes[node.left].bb, Interval(i.s, closest_now),
+                   left_hit)) {
+            if (hits(o.b.nodes[node.left + 1].bb, Interval(i.s, closest_now),
+                     right_hit)) {
+              // Both nodes have a hit, we put the closest up on the stack
+              if (left_hit.t < right_hit.t) {
+                stack[stackPtr++] = node.left + 1;
+                stack[stackPtr++] = node.left;
+              } else {
+                stack[stackPtr++] = node.left;
+                stack[stackPtr++] = node.left + 1;
+              }
+            } else {
+              // Right node has not hit, we only put the left one on the stack
+              stack[stackPtr++] = node.left;
+            }
+          } else {
+            // Left node has not hit, we only put the right one on the stack
+            stack[stackPtr++] = node.left + 1;
+          }
         }
       }
       break;
@@ -200,6 +244,7 @@ struct Ray {
         if (hits(s, Interval(i.s, closest_now), hit)) {
           did_hit = true;
           closest_now = hit.t;
+          hit.kP = k;
         }
       }
       break;
@@ -209,14 +254,15 @@ struct Ray {
   }
 
   __device__ bool nearestHit(Object *objects, int nObjects, Interval i,
-                             Hit &hit) {
+                             Hit &hit, Hit last_hit = {.kO = -1}) {
 
     bool did_hit = false;
     float closest_now = i.e;
     for (int k = 0; k < nObjects; k++) {
-      if (hits(objects[k], Interval(i.s, closest_now), hit)) {
+      if (hits(objects[k], Interval(i.s, closest_now), hit,
+               (last_hit.kO == k) ? last_hit.kP : -1)) {
         did_hit = true;
-        hit.k = k; // TODO : Change this; it prevents self shadowing
+        hit.kO = k;
         closest_now = hit.t;
       }
     }
@@ -237,11 +283,14 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
   real3 color = real3();
   real throughput = 1;
   Ray current_ray = r;
+  Hit last_hit = {.kO = -1};
   for (int depth = 0; depth <= recursion_depth; depth++) {
     Hit hit;
-    if (!current_ray.nearestHit(objects, nObjects, Interval(0., 1. / 0.), hit))
+    if (!current_ray.nearestHit(objects, nObjects, Interval(0, 1. / 0.), hit,
+                                last_hit))
       break;
-    Material material = objects[hit.k].mat;
+    last_hit = hit;
+    Material material = objects[hit.kO].mat;
     // We create as many rays as there are lights and look for intersections
     // along the way
 
@@ -254,8 +303,8 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
       real3 L = real3(light.pos) - hit.p;
       Ray sr = {hit.p, normalized(L)};
       Hit obstacleHit;
-      if (!sr.nearestHit(objects, nObjects, Interval(EPSILON, length(L)),
-                         obstacleHit)) {
+      if (!sr.nearestHit(objects, nObjects, Interval(0, length(L)), obstacleHit,
+                         last_hit)) {
         // There is light (yepee)
         // We shade with the material
         real3 L = light.pos - hit.p;
@@ -291,7 +340,7 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
       // Refraction dir is the symmetric of ray dir relative to normal:
       real3 reflected_dir =
           current_ray.dir - 2 * hit.n * dot(hit.n, current_ray.dir);
-      current_ray = Ray(hit.p + EPSILON * hit.n, reflected_dir);
+      current_ray = Ray(hit.p, reflected_dir);
       throughput *= material.kS;
       if (throughput < THROUGHPUT_EPSILON)
         break;
@@ -369,6 +418,11 @@ RScene scene;
 
 void updateCamera(RCamera rcam) { scene.cam = rcam; }
 
+void reallocDeviceFramebuffer() {
+  cudaFree(scene.d_framebuffer);
+  cudaMalloc(&scene.d_framebuffer, sizeof(float4) * w * h);
+}
+
 void init_raytracing(RCamera cam, LightSource *lights, int nLights,
                      Object *objects, int nObjects, float4 *framebuffer) {
   // Calculation of camera matrix
@@ -398,39 +452,60 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
 
   // We copy memory for each object, changing only the pointers
   for (int i = 0; i < nObjects; i++) {
-    Object o = objects[i];
-    dh_objects[i] = o;
-    switch (o.type) {
+    dh_objects[i] = objects[i];
+    const Object &cpu_obj = objects[i];
+    Object &gpu_obj = dh_objects[i];
+    // If there is a BVH, we need to reallocate it
+    if (cpu_obj.b.nodes != nullptr) {
+      BVHNode *d_nodes;
+      gpuErrchk(cudaMalloc(&d_nodes,
+                           sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1)));
+      gpuErrchk(cudaMemcpy(d_nodes, cpu_obj.b.nodes,
+                           sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1),
+                           cudaMemcpyHostToDevice));
+      gpu_obj.b.nodes = d_nodes;
+    }
+    if (cpu_obj.b.objects != nullptr) {
+      BVHObj *d_objects;
+      gpuErrchk(cudaMalloc(&d_objects, sizeof(BVHObj) * cpu_obj.nPrimitives));
+      gpuErrchk(cudaMemcpy(d_objects, cpu_obj.b.objects,
+                           sizeof(BVHObj) * cpu_obj.nPrimitives,
+                           cudaMemcpyHostToDevice));
+      gpu_obj.b.objects = d_objects;
+    }
+
+    switch (cpu_obj.type) {
     case SPHERE: {
       // We only need to reallocate the Sphere*
       Sphere *d_spheres;
-      gpuErrchk(cudaMalloc(&d_spheres, sizeof(Sphere) * o.nPrimitives));
-      gpuErrchk(cudaMemcpy(d_spheres, o.data.spheres,
-                           sizeof(Sphere) * o.nPrimitives,
+      gpuErrchk(cudaMalloc(&d_spheres, sizeof(Sphere) * cpu_obj.nPrimitives));
+      gpuErrchk(cudaMemcpy(d_spheres, cpu_obj.data.spheres,
+                           sizeof(Sphere) * cpu_obj.nPrimitives,
                            cudaMemcpyHostToDevice));
       dh_objects[i].data.spheres = d_spheres;
       break;
     }
     case TRIANGLE: {
       real3 *d_verts;
-      gpuErrchk(
-          cudaMalloc(&d_verts, sizeof(real3) * o.data.triangleMesh.nVerts));
-      gpuErrchk(cudaMemcpy(d_verts, o.data.triangleMesh.vertices,
-                           sizeof(real3) * o.data.triangleMesh.nVerts,
+      gpuErrchk(cudaMalloc(&d_verts,
+                           sizeof(real3) * cpu_obj.data.triangleMesh.nVerts));
+      gpuErrchk(cudaMemcpy(d_verts, cpu_obj.data.triangleMesh.vertices,
+                           sizeof(real3) * cpu_obj.data.triangleMesh.nVerts,
                            cudaMemcpyHostToDevice));
       real3 *d_norm;
-      gpuErrchk(
-          cudaMalloc(&d_norm, sizeof(real3) * o.data.triangleMesh.nVerts));
-      gpuErrchk(cudaMemcpy(d_norm, o.data.triangleMesh.normals,
-                           sizeof(real3) * o.data.triangleMesh.nVerts,
+      gpuErrchk(cudaMalloc(&d_norm,
+                           sizeof(real3) * cpu_obj.data.triangleMesh.nVerts));
+      gpuErrchk(cudaMemcpy(d_norm, cpu_obj.data.triangleMesh.normals,
+                           sizeof(real3) * cpu_obj.data.triangleMesh.nVerts,
                            cudaMemcpyHostToDevice));
-      size_t *d_tris;
-      gpuErrchk(cudaMalloc(&d_tris, sizeof(size_t) * o.nPrimitives * 3));
-      gpuErrchk(cudaMemcpy(d_tris, o.data.triangleMesh.triangles,
-                           sizeof(size_t) * o.nPrimitives * 3,
+      index_t *d_tris;
+      gpuErrchk(cudaMalloc(&d_tris, sizeof(index_t) * cpu_obj.nPrimitives * 3));
+      gpuErrchk(cudaMemcpy(d_tris, cpu_obj.data.triangleMesh.triangles,
+                           sizeof(index_t) * cpu_obj.nPrimitives * 3,
                            cudaMemcpyHostToDevice));
-      dh_objects[i].data.triangleMesh = {d_verts, d_norm,
-                                         o.data.triangleMesh.nVerts, d_tris};
+      dh_objects[i].data.triangleMesh = {
+          d_verts, d_norm, cpu_obj.data.triangleMesh.nVerts, d_tris,
+          cpu_obj.data.triangleMesh.nTriangles};
 
       break;
     }
@@ -441,6 +516,7 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
   gpuErrchk(cudaMalloc(&scene.d_objects, sizeof(Object) * nObjects));
   gpuErrchk(cudaMemcpy(scene.d_objects, dh_objects, sizeof(Object) * nObjects,
                        cudaMemcpyHostToDevice));
+  free(dh_objects);
 }
 
 void raytrace(float4 *framebuffer) {
@@ -488,8 +564,8 @@ genSphere(const unsigned int resolution) // should generate a unit sphere
   real3 *vpos = (real3 *)malloc(sizeof(real3) * latCount * lonCount);
   real3 *vnorm = (real3 *)malloc(sizeof(real3) * latCount * lonCount);
   float2 *vtexcoords = (float2 *)malloc(sizeof(float2) * latCount * lonCount);
-  size_t *trInd =
-      (size_t *)malloc(sizeof(size_t) * 24 * resolution * resolution);
+  index_t *trInd =
+      (index_t *)malloc(sizeof(index_t) * 24 * resolution * resolution);
 
   for (unsigned int i = 0; i < latCount; ++i) {
     float phi = (float)i / (float)(latCount - 1) * glm::pi<float>() -
@@ -527,64 +603,6 @@ genSphere(const unsigned int resolution) // should generate a unit sphere
       trInd[6 * (j + i * (lonCount - 1)) + 5] = d;
     }
   }
-  return TriangleMesh({vpos, vnorm, latCount * lonCount, trInd});
+  return TriangleMesh({vpos, vnorm, latCount * lonCount, trInd,
+                       2 * (lonCount - 1) * (latCount - 1)});
 };
-
-int _main() {
-  // We intialise camera
-
-  RCamera cam = {real3(0, 0, 1. / glm::atan(glm::radians(22.5))) + .5,
-                 real3(0, 0, 0),
-                 real3(0, 1, 0),
-                 45.f,
-                 .1f,
-                 1000.f,
-                 aspect};
-
-  LightSource lights[3] = {
-      {real3(0., 2., 1.) * .8f, .5f, real3(1., 1., 1.), true},
-      {real3(.3, 1.5, 1.4), .5f, real3(1., 1., .8), true},
-      {real3(2., .5, -.2) * .8f, .5f, real3(1., 1., .8), true},
-  };
-
-  // Sphere of radius r and center C
-  Sphere s = {real3(), 1};
-  // Red material for the sphere
-  Material sphereMat = {
-      real3(1, 0, 0), .2, real3(1, 0, 0), .7, real3(1, 1, 1), .01, 32.,
-      PHONG_MATERIAL};
-  Material planeMat = {
-      real3(.5, .5, .5), .2, real3(.5, .5, .5), .7, real3(1, 1, 1), .01, 32.,
-      PHONG_MATERIAL};
-
-  Object st = Object(sphereMat, genSphere(16), 8 * 16 * 16);
-  Object so = Object(sphereMat, &s, 1);
-  real3 planeVertices[4] = {
-      {-1, -1, -1},
-      {-1, -1, 1},
-      {1, -1, 1},
-      {1, -1, -1},
-  };
-  real3 planeNormals[4] = {
-      {0, 1, 0},
-      {0, 1, 0},
-      {0, 1, 0},
-      {0, 1, 0},
-  };
-  size_t planeTris[6] = {0, 1, 2, 0, 2, 3};
-  Object plane =
-      Object(planeMat, {planeVertices, planeNormals, 4, planeTris}, 2);
-  Object objects[2] = {st, plane};
-
-  float4 *h_framebuffer = (float4 *)malloc(sizeof(float4) * w * h);
-  init_raytracing(cam, lights, 3, objects, 2, h_framebuffer);
-  for (int i = 0; i < 10; i++)
-    raytrace(h_framebuffer);
-  end_raytracing();
-
-  printf("Finished raytracing\n");
-  imageWrite(h_framebuffer, "test.ppm", w, h);
-
-  free(h_framebuffer);
-  return 0;
-}

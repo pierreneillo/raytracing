@@ -11,12 +11,18 @@
 #include <glm/fwd.hpp>
 #include <glm/matrix.hpp>
 #include <string>
+#include <unordered_map>
 
 Camera *camPtr = nullptr;
 
 cudaGraphicsResource *current_pos_buffer;
 
 bool windowHasChanged = false;
+
+// We scale the texture to allow anti-aliasing on one end and low res on the
+// other
+// Scaling factor corresponds to raytraced texture width / actual window width
+float scaling_factor = 2;
 
 // *****************
 // *  Shader mgmt  *
@@ -72,8 +78,8 @@ GLuint createBasicProgram() {
 
 void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
   glViewport(0, 0, width, height);
-  w = width;
-  h = height;
+  w = width * scaling_factor;
+  h = height * scaling_factor;
   aspect = (float)width / (float)height;
   windowHasChanged = true;
 }
@@ -171,7 +177,7 @@ Object makePlane(real3 centerPos, real size, int axis, Material planeMat) {
       {0, 1, 0},
       {0, 1, 0},
   };
-  size_t *indices = new size_t[6]{0, 1, 2, 0, 2, 3};
+  index_t *indices = new index_t[6]{0, 1, 2, 0, 2, 3};
 
   glm::mat4 model = glm::mat4(1.0f);
 
@@ -196,65 +202,71 @@ Object makePlane(real3 centerPos, real size, int axis, Material planeMat) {
   for (int i = 0; i < 4; i++)
     norms[i] = glm::vec3(normalModel * glm::vec4(glm::vec3(norms[i]), 1.));
 
-  Object plane = Object(planeMat, {verts, norms, 4, indices}, 2);
+  Object plane = Object(planeMat, {verts, norms, 4, indices, 2}, 2);
 
   return plane;
 }
 
-TriangleMesh loadMesh(std::string filename, int &nTriangles) {
+TriangleMesh loadMesh(std::string filename) {
   // Wrapper to the tinyobjloader
   tinyobj::ObjReaderConfig reader_config;
+  reader_config.triangulate = true;
   tinyobj::ObjReader reader;
-
+  TriangleMesh t;
   if (!reader.ParseFromFile(filename, reader_config)) {
     std::cerr << "There was an error while loading mesh '" << filename << "'"
               << std::endl;
     // To prevent error upon mesh loading
-    nTriangles = 0;
+    t.nTriangles = 0;
   };
 
   const tinyobj::attrib_t &attrib = reader.GetAttrib();
   const std::vector<tinyobj::shape_t> &shapes = reader.GetShapes();
 
-  TriangleMesh t;
-  t.nVerts = attrib.vertices.size() / 3;
-  t.vertices = new real3[t.nVerts];
-  t.normals = new real3[t.nVerts];
-  for (int i = 0; i < t.nVerts; i++) {
-    // We copy data
-    t.vertices[i] = {
-        attrib.vertices[3 * i],
-        attrib.vertices[3 * i + 1],
-        attrib.vertices[3 * i + 2],
-    };
-    // We set the normals at 0 as we will need to average over all the faces
-    t.normals[i] = {0, 0, 0};
-  }
+  std::vector<real3> vertices;
+  std::vector<real3> normals;
+  std::unordered_map<long long, index_t> index_pairs;
+  std::vector<index_t> indexes;
 
-  std::vector<size_t> indexes;
   for (auto &shape : shapes)
     for (auto &idx : shape.mesh.indices) {
-      indexes.push_back(idx.vertex_index);
-      // We add the normal if there is one
-      if (idx.normal_index >= 0) {
-        int i = idx.normal_index;
-        real3 localNormal = {
-            attrib.normals[3 * i],
-            attrib.normals[3 * i + 1],
-            attrib.normals[3 * i + 2],
-        };
-        t.normals[idx.vertex_index] += localNormal;
+      // For each vertex of each face, we look at the (vertex, normal) pair and
+      long long ids =
+          ((long long)idx.normal_index << 32) | (unsigned int)idx.vertex_index;
+      if (index_pairs.count(ids) == 0) {
+        // We have not yet encountered this vertex
+        // We setup the vertex id
+        index_pairs[ids] = vertices.size();
+        int i = idx.vertex_index;
+        int j = idx.normal_index;
+
+        vertices.push_back({
+            attrib.vertices[3 * i],
+            attrib.vertices[3 * i + 1],
+            attrib.vertices[3 * i + 2],
+        });
+        if (j < 0) {
+          normals.push_back({0, 1, 0});
+        } else {
+          normals.push_back({
+              attrib.normals[3 * j],
+              attrib.normals[3 * j + 1],
+              attrib.normals[3 * j + 2],
+          });
+        }
       }
+      indexes.push_back(index_pairs[ids]);
     }
 
-  // We normalize the normals
-  for (int i = 0; i < t.nVerts; i++)
-    t.normals[i] = normalized(t.normals[i]);
-
-  // Lastly we copy the triangles in the designated buffer
-  t.triangles = new size_t[indexes.size()];
+  // Lastly we copy the data in the designated buffers
+  t.nVerts = vertices.size();
+  t.vertices = new real3[t.nVerts];
+  std::copy(vertices.begin(), vertices.end(), t.vertices);
+  t.normals = new real3[t.nVerts];
+  std::copy(normals.begin(), normals.end(), t.normals);
+  t.triangles = new index_t[indexes.size()];
   std::copy(indexes.begin(), indexes.end(), t.triangles);
-  nTriangles = indexes.size() / 3;
+  t.nTriangles = indexes.size() / 3;
 
   return t;
 }
@@ -269,19 +281,20 @@ int main() {
   // Compile Shaders and create program
   program = createBasicProgram();
 
-  static Camera cam = Camera(real3(0, 1, 2. / glm::atan(glm::radians(22.5))),
-                             real3(0, 0, 0), real3(0, 1, 0), 45.f);
+  static Camera cam = Camera(real3(0, 1, 1. / glm::atan(glm::radians(22.5))),
+                             real3(0, 1., 0), real3(0, 1, 0), 45.f);
 
   camPtr = &cam;
 
   RCamera rcam = {cam.eye, cam.at, cam.up, cam.fov, cam.near, cam.far, aspect};
 
   // Temporary setup
-#define N_LIGHTS 2
+#define N_LIGHTS 4
   LightSource lights[N_LIGHTS] = {
       {real3(0., 3, 0.), 1.f, real3(1., 1., 1.), true},
       {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
-      // {real3(.8, -.5, 0.), .5f, real3(1., .8, .3), true},
+      {real3(2., 1.5, 0.), 1.f, real3(1., .8, .3), true},
+      {real3(0., 1.12, 0.015), 1.f, real3(1., .8, .3), true},
 
   };
 
@@ -296,8 +309,8 @@ int main() {
   // Sphere s = {real3(), 1.};
   // Object so = Object(planeMat, &s, 1);
   int nTriangles;
-  TriangleMesh gobeletMesh = loadMesh("data/gobelet.obj", nTriangles);
-  Object gobelet = Object(gobeletMaterial, gobeletMesh, nTriangles);
+  TriangleMesh gobeletMesh = loadMesh("data/monk_high.obj");
+  Object gobelet = Object(gobeletMaterial, gobeletMesh, gobeletMesh.nTriangles);
 #define N_OBJ 2
   Object objects[N_OBJ] = {makePlane({0, 0, 0}, 4, 1, planeMat), gobelet};
 
@@ -319,6 +332,8 @@ int main() {
   GLuint texture;
   glCreateTextures(GL_TEXTURE_2D, 1, &texture);
   glTextureStorage2D(texture, 1, GL_RGBA32F, w, h);
+  glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glUseProgram(program);
   glBindTextureUnit(0, texture);
 
@@ -330,8 +345,11 @@ int main() {
       windowHasChanged = false;
       rcam.aspect = aspect;
       h_framebuffer = (float4 *)realloc(h_framebuffer, sizeof(float4) * w * h);
+      reallocDeviceFramebuffer();
       glDeleteTextures(1, &texture);
       glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+      glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
       glTextureStorage2D(texture, 1, GL_RGBA32F, w, h);
       glBindTextureUnit(0, texture);
     }
@@ -340,6 +358,7 @@ int main() {
     raytrace(h_framebuffer);
     float delta = glfwGetTime() - last_t;
     printf("%.2f FPS       \r", 1. / delta);
+    fflush(stdout);
 
     glTextureSubImage2D(texture, 0, 0, 0, w, h, GL_RGBA, GL_FLOAT,
                         h_framebuffer);
