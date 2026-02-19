@@ -1,3 +1,5 @@
+#ifndef UTILITIES_H
+#define UTILITIES_H
 #include <cstdio>
 #include <glm/glm.hpp>
 
@@ -19,7 +21,29 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 * Constants *
 \***********/
 
+extern uint w;
+extern uint h;
+extern float aspect;
+
+extern uint recursion_depth;
+
 #define MAX_BLOCK_SIZE 256
+
+// Epsilon used in elemination criteria for parralel rays in triangle
+// intersection
+#define TRIANGLE_EPSILON .0000001
+
+// Epsilon used in elimination criteria for low throughput contribution in
+// recursive raytracing
+#define THROUGHPUT_EPSILON .001
+
+// Maw tree depth for BVH traversal
+#define MAX_TREE_DEPTH 32
+
+inline __device__ void imageStore(float4 *image, uint w, uint2 coords,
+                                  float4 value) {
+  image[coords.x + coords.y * w] = value;
+}
 
 /*********************************************\
 * Vector type definition and helper functions *
@@ -27,6 +51,116 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 
 typedef float real;
 typedef uint32_t index_t;
+
+typedef unsigned int ind;
+
+struct real2 {
+  real x, y;
+
+  __host__ __device__ real2() {
+    x = 0.f;
+    y = 0.f;
+  };
+
+  __host__ __device__ real2(real x, real y) : x(x), y(y) {}
+
+  // Adapted from code of Kiwon Um (kiwon.um@telecom-paris.fr)
+  __host__ __device__ real2 &operator+=(const real2 &r) {
+    x += r.x;
+    y += r.y;
+    return *this;
+  }
+  __host__ __device__ real2 &operator-=(const real2 &r) {
+    x -= r.x;
+    y -= r.y;
+    return *this;
+  }
+  __host__ __device__ real2 &operator*=(const real2 &r) {
+    x *= r.x;
+    y *= r.y;
+    return *this;
+  }
+  __host__ __device__ real2 &operator/=(const real2 &r) {
+    x /= r.x;
+    y /= r.y;
+    return *this;
+  }
+
+  __host__ __device__ real2 &operator+=(const real s) {
+    x += s;
+    y += s;
+    return *this;
+  }
+  __host__ __device__ real2 &operator-=(const real s) {
+    x -= s;
+    y -= s;
+    return *this;
+  }
+  __host__ __device__ real2 &operator*=(const real s) {
+    x *= s;
+    y *= s;
+    return *this;
+  }
+  __host__ __device__ real2 &operator/=(const real s) {
+    const real d = static_cast<real>(1) / s;
+    return operator*=(d);
+  }
+
+  // unary operators
+  __host__ __device__ real2 operator+() const { return *this; }
+  __host__ __device__ real2 operator-() const { return {-x, -y}; }
+
+  // binary operators
+  __host__ __device__ real2 operator+(const real2 &r) const {
+    return real2(*this) += r;
+  }
+  __host__ __device__ real2 operator-(const real2 &r) const {
+    return real2(*this) -= r;
+  }
+  __host__ __device__ real2 operator*(const real2 &r) const {
+    return real2(*this) *= r;
+  }
+  __host__ __device__ real2 operator/(const real2 &r) const {
+    return real2(*this) /= r;
+  }
+
+  __host__ __device__ real2 operator+(const real s) const {
+    return real2(*this) += s;
+  }
+  __host__ __device__ real2 operator-(const real s) const {
+    return real2(*this) -= s;
+  }
+  __host__ __device__ real2 operator*(const real s) const {
+    return real2(*this) *= s;
+  }
+  __host__ __device__ real2 operator/(const real s) const {
+    return real2(*this) /= s;
+  }
+
+  __host__ __device__ friend real2 operator+(const real s, const real2 v) {
+    return v + s;
+  }
+  __host__ __device__ friend real2 operator-(const real s, const real2 v) {
+    return v - s;
+  }
+  __host__ __device__ friend real2 operator*(const real s, const real2 v) {
+    return v * s;
+  }
+  __host__ __device__ friend real2 operator/(const real s, const real2 v) {
+    return v / s;
+  }
+
+  // comparison operators
+  __host__ __device__ bool operator==(const real2 &r) const {
+    return ((x == r.x) && (y == r.y));
+  }
+  __host__ __device__ bool operator!=(const real2 &r) const {
+    return !((*this) == r);
+  }
+  __host__ __device__ bool operator<(const real2 &r) const {
+    return (x != r.x) ? x < r.x : y < r.y;
+  }
+};
 
 struct real3 {
   real x, y, z;
@@ -181,6 +315,10 @@ __host__ __device__ __forceinline__ real3 normalized(real3 v) {
   return v / length(v);
 }
 
+__host__ __device__ __forceinline__ real square(real x) { return x * x; }
+
+__host__ __device__ __forceinline__ real cube(real x) { return x * x * x; }
+
 template <typename T>
 __device__ __host__ __forceinline__ T clamp(T v, T vmin, T vmax) {
   return max(min(v, vmax), vmin);
@@ -203,3 +341,5 @@ inline __device__ float4 mul(const float *mat, float4 v) {
   result.w = mat[3] * v.x + mat[7] * v.y + mat[11] * v.z + mat[15] * v.w;
   return result;
 }
+
+#endif // UTILITIES_H

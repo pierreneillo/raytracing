@@ -1,9 +1,8 @@
 #include "Camera.hpp"
 #include "Error.hpp"
 #include "Utils.hpp"
+#include <cuda_runtime_api.h>
 
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "../dep/tiny_obj_loader.hpp"
 #include <cstddef>
 #include <cstdio>
 #include <driver_types.h>
@@ -11,18 +10,20 @@
 #include <glm/fwd.hpp>
 #include <glm/matrix.hpp>
 #include <string>
-#include <unordered_map>
 
 Camera *camPtr = nullptr;
 
 cudaGraphicsResource *current_pos_buffer;
 
 bool windowHasChanged = false;
+bool shouldSwapToWaterMonk = false;
+bool waterMonkActive = false;
+bool playSimulation = false;
 
 // We scale the texture to allow anti-aliasing on one end and low res on the
 // other
 // Scaling factor corresponds to raytraced texture width / actual window width
-float scaling_factor = 2;
+float scaling_factor = 3;
 
 // *****************
 // *  Shader mgmt  *
@@ -86,13 +87,19 @@ void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
 
 void printHelp() {
   std::cout << "Help : " << std::endl
-            << "\tEsc, W\tQuit the application" << std::endl;
+            << "\tEsc, A\tQuit the application" << std::endl
+            << "\tW\tReplace monk by water monk" << std::endl
+            << "\tSpace\tPlay / Pause water monk simulation" << std::endl;
 }
 
 void keyCallback(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
   if (action == GLFW_PRESS && key == GLFW_KEY_H) {
     printHelp();
+  } else if (action == GLFW_PRESS && key == GLFW_KEY_Z) {
+    shouldSwapToWaterMonk = true;
+  } else if (action == GLFW_PRESS && key == GLFW_KEY_SPACE) {
+    playSimulation = !playSimulation;
   } else if ((action == GLFW_PRESS && key == GLFW_KEY_A) ||
              (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)) {
     glfwSetWindowShouldClose(window, true);
@@ -202,76 +209,15 @@ Object makePlane(real3 centerPos, real size, int axis, Material planeMat) {
   for (int i = 0; i < 4; i++)
     norms[i] = glm::vec3(normalModel * glm::vec4(glm::vec3(norms[i]), 1.));
 
-  Object plane = Object(planeMat, {verts, norms, 4, indices, 2}, 2);
+  Object plane = Object(planeMat, {verts, norms, 4, indices, 2});
 
   return plane;
 }
 
-TriangleMesh loadMesh(std::string filename) {
-  // Wrapper to the tinyobjloader
-  tinyobj::ObjReaderConfig reader_config;
-  reader_config.triangulate = true;
-  tinyobj::ObjReader reader;
-  TriangleMesh t;
-  if (!reader.ParseFromFile(filename, reader_config)) {
-    std::cerr << "There was an error while loading mesh '" << filename << "'"
-              << std::endl;
-    // To prevent error upon mesh loading
-    t.nTriangles = 0;
-  };
-
-  const tinyobj::attrib_t &attrib = reader.GetAttrib();
-  const std::vector<tinyobj::shape_t> &shapes = reader.GetShapes();
-
-  std::vector<real3> vertices;
-  std::vector<real3> normals;
-  std::unordered_map<long long, index_t> index_pairs;
-  std::vector<index_t> indexes;
-
-  for (auto &shape : shapes)
-    for (auto &idx : shape.mesh.indices) {
-      // For each vertex of each face, we look at the (vertex, normal) pair and
-      long long ids =
-          ((long long)idx.normal_index << 32) | (unsigned int)idx.vertex_index;
-      if (index_pairs.count(ids) == 0) {
-        // We have not yet encountered this vertex
-        // We setup the vertex id
-        index_pairs[ids] = vertices.size();
-        int i = idx.vertex_index;
-        int j = idx.normal_index;
-
-        vertices.push_back({
-            attrib.vertices[3 * i],
-            attrib.vertices[3 * i + 1],
-            attrib.vertices[3 * i + 2],
-        });
-        if (j < 0) {
-          normals.push_back({0, 1, 0});
-        } else {
-          normals.push_back({
-              attrib.normals[3 * j],
-              attrib.normals[3 * j + 1],
-              attrib.normals[3 * j + 2],
-          });
-        }
-      }
-      indexes.push_back(index_pairs[ids]);
-    }
-
-  // Lastly we copy the data in the designated buffers
-  t.nVerts = vertices.size();
-  t.vertices = new real3[t.nVerts];
-  std::copy(vertices.begin(), vertices.end(), t.vertices);
-  t.normals = new real3[t.nVerts];
-  std::copy(normals.begin(), normals.end(), t.normals);
-  t.triangles = new index_t[indexes.size()];
-  std::copy(indexes.begin(), indexes.end(), t.triangles);
-  t.nTriangles = indexes.size() / 3;
-
-  return t;
-}
+real3 *initParticles() { return nullptr; }
 
 int main() {
+  // We need to explicitly ask for the NVIDIA card
   setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 1);
   setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 1);
   if (initGLX()) {
@@ -281,6 +227,7 @@ int main() {
   // Compile Shaders and create program
   program = createBasicProgram();
 
+  // Setup the camera (which will always stay centered on the same point)
   static Camera cam = Camera(real3(0, 1, 1. / glm::atan(glm::radians(22.5))),
                              real3(0, 1., 0), real3(0, 1, 0), 45.f);
 
@@ -302,46 +249,103 @@ int main() {
       real3(1., 1., 1.), .1, real3(1., 1., 1.), .9, real3(1, 1, 1), .1, 32.,
       PHONG_MATERIAL};
 
-  Material gobeletMaterial = {
-      real3(1., 1., 1.), .1, real3(1., 1., 1.), 1, real3(1, 1, 1), 0, 32.,
+  Material monkMaterial = {
+      real3(.3, .7, 1.), .1, real3(.3, .7, 1.), 1., real3(1, 1, 1), 0., 32.,
       PHONG_MATERIAL};
 
-  // Sphere s = {real3(), 1.};
-  // Object so = Object(planeMat, &s, 1);
   int nTriangles;
-  TriangleMesh gobeletMesh = loadMesh("data/monk_high.obj");
-  Object gobelet = Object(gobeletMaterial, gobeletMesh, gobeletMesh.nTriangles);
+  TriangleMesh monkMesh = loadMesh("data/monk_high.obj");
+  Object monk = Object(monkMaterial, monkMesh);
+
+  // Water monk
+  real waterMonkScale = 30.9755;
+  real3 waterMonkTranslation = {10.2633, 2, 10.6204};
+  index_t nParticles = initFetcher("positions.txt");
+  if (nParticles == 0) {
+    fprintf(stderr,
+            "Could not read particle count from second_positions.txt\n");
+    return -1;
+  }
+  real3 *particleCenters =
+      fetchAndTransformPositions(waterMonkScale, waterMonkTranslation);
+  if (particleCenters == nullptr) {
+    fprintf(stderr, "Could not read initial particle positions\n");
+    closeFetcher();
+    return -1;
+  }
+  std::vector<real> radii = std::vector<real>(nParticles, .0081);
+  SphereMesh particles = {particleCenters, radii.data(), nParticles};
+  Object waterMonk = Object(monkMaterial, particles);
 #define N_OBJ 2
-  Object objects[N_OBJ] = {makePlane({0, 0, 0}, 4, 1, planeMat), gobelet};
+  Object objects[N_OBJ] = {makePlane({0, -.06, 0}, 4, 1, planeMat), monk};
 
   GLuint vao;
   glCreateVertexArrays(1, &vao);
   glBindVertexArray(vao);
 
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_DEPTH_TEST);
-
   int iw, ih;
   glfwGetFramebufferSize(window, &iw, &ih);
-  w = iw;
-  h = ih;
+  w = iw * scaling_factor;
+  h = ih * scaling_factor;
   aspect = (float)w / (float)h;
 
+  recording = true;
+  TARGET_FPS = 100.f;
+  if (recording)
+    startRecording(iw, ih);
+
   float4 *h_framebuffer = (float4 *)malloc(sizeof(float4) * w * h);
+  Object *dh_objects =
+      init_raytracing(rcam, lights, N_LIGHTS, objects, N_OBJ, h_framebuffer);
+
+  // Creating and setting up the texture to render our CUDA framebuffer
   GLuint texture;
   glCreateTextures(GL_TEXTURE_2D, 1, &texture);
+  // RGBA texture because the CUDA framebuffer is a float4
   glTextureStorage2D(texture, 1, GL_RGBA32F, w, h);
+  // For minification, i.e. anti-aliasing
   glTextureParameteri(texture, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  // For magnification, i.e. low resolution (we want the texture to look blocky,
+  // not out of focus)
   glTextureParameteri(texture, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  // Finally we bind the texture to our shader program
   glUseProgram(program);
   glBindTextureUnit(0, texture);
 
-  init_raytracing(rcam, lights, N_LIGHTS, objects, N_OBJ, h_framebuffer);
-
   while (!glfwWindowShouldClose(window)) {
+
+    // We update the camera's position at each frame
     rcam.eye = cam.eye;
+
+    if (shouldSwapToWaterMonk && !waterMonkActive) {
+      replaceObjectWithSphere(1, waterMonk);
+      waterMonkActive = true;
+      shouldSwapToWaterMonk = false;
+    }
+
+    if (waterMonkActive && playSimulation) {
+      if (!fetchAndTransformPositionsInPlace(particleCenters, waterMonkScale,
+                                             waterMonkTranslation)) {
+        closeFetcher();
+        // We try to reopen the simulation, to loop
+        if (initFetcher("positions.txt") == nParticles) {
+          if (!fetchAndTransformPositionsInPlace(
+                  particleCenters, waterMonkScale, waterMonkTranslation)) {
+            fprintf(stderr, "Could not stream particle positions\n");
+            playSimulation = false;
+            break;
+          }
+        } else {
+          fprintf(stderr, "Could not reopen positions.txt\n");
+          playSimulation = false;
+          break;
+        }
+      }
+      updateSphereObjectAndRebuildBVH(1, particleCenters, nParticles);
+    }
     if (windowHasChanged) {
+      // If the geometry of the window has changed, we need to reallocate both
+      // the texture and the cuda buffer
       windowHasChanged = false;
       rcam.aspect = aspect;
       h_framebuffer = (float4 *)realloc(h_framebuffer, sizeof(float4) * w * h);
@@ -357,6 +361,7 @@ int main() {
     float last_t = glfwGetTime();
     raytrace(h_framebuffer);
     float delta = glfwGetTime() - last_t;
+
     printf("%.2f FPS       \r", 1. / delta);
     fflush(stdout);
 
@@ -366,12 +371,19 @@ int main() {
 
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
+    if (recording)
+      recordFrame(iw, ih);
+
     glfwSwapBuffers(window);
     glfwPollEvents();
   }
   glDeleteVertexArrays(1, &vao);
   glDeleteProgram(program);
+  closeFetcher();
+  delete[] particleCenters;
   end_raytracing();
+  if (recording && ffmpegPipe)
+    pclose(ffmpegPipe);
   glfwTerminate();
 
   return 0;

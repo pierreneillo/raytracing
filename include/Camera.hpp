@@ -7,7 +7,7 @@
 
 using namespace glm;
 
-#define CAMERA_EPSILON .00001
+#define CAMERA_EPSILON .0001
 
 enum CamType { ORTHOGRAPHIC, PERSPECTIVE };
 
@@ -37,7 +37,8 @@ struct Camera {
     vec3 right = glm::cross(up, direction);
     mat4 YRot = glm::rotate(mat4(1.f), -r.y * moving_speed.y, right);
     direction = vec3(YRot * vec4(direction, 1.f));
-    if (abs(glm::dot(up, glm::normalize(direction))) > 1 - CAMERA_EPSILON)
+    if (abs(glm::dot(up, glm::normalize(direction))) >
+        1 - CAMERA_EPSILON * r.length())
       return;
 
     eye = at + direction;

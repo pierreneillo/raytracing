@@ -4,6 +4,7 @@ build/
 dep/
 data/
 finalProj
+particle_sim
 Makefile
 CMakeCache.txt
 CMakeFiles
@@ -11,3 +12,5 @@ cmake_install.cmake
 compile_commands.json
 raytracer
 .clang*
+*positions.txt
+*.mp4

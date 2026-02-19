@@ -2,51 +2,52 @@
 
 // #define SAH
 
-BVH buildBVH(TriangleMesh tm) {
+template <typename Mesh> __host__ __device__ BVH buildBVH(Mesh m) {
   BVH b;
-  b.objects = new BVHObj[tm.nTriangles];
-  b.nodes = new BVHNode[tm.nTriangles * 2 + 1];
-  for (index_t i = 0; i < tm.nTriangles; i++) {
-    b.objects[i] = {i, (tm.vertices[tm.triangles[3 * i]] +
-                        tm.vertices[tm.triangles[3 * i + 1]] +
-                        tm.vertices[tm.triangles[3 * i + 2]]) /
-                           3};
+  b.objects = new BVHObj[m.nPrimitives];
+  b.nodes = new BVHNode[m.nPrimitives * 2 + 1];
+  for (index_t i = 0; i < m.nPrimitives; i++) {
+    b.objects[i] = {i, m.centroid(i)};
   }
   BVHNode &root = b.nodes[0];
   root.firstPrimitive = 0;
-  root.nPrimitives = tm.nTriangles;
-  printf("Starting building BVH for %lu triangles...\n", tm.nTriangles);
-  updateNodeBounds(b, tm, 0);
+  root.nPrimitives = m.nPrimitives;
+  printf("Starting building BVH for %u primitives...\n", m.nPrimitives);
+  updateNodeBounds(b, m, 0);
   b.nodes_used++;
   printf("Now recursing...\n");
-  subdivide(b, tm, 0);
+  subdivide(b, m, 0);
   return b;
 }
 
-void updateNodeBounds(BVH &b, TriangleMesh &tm, index_t nodeIdx) {
+// We force template construction, otherwise it doesn't work
+template __host__ __device__ BVH buildBVH<TriangleMesh>(TriangleMesh m);
+template __host__ __device__ BVH buildBVH<SphereMesh>(SphereMesh m);
+
+template <typename Mesh>
+__host__ __device__ void updateNodeBounds(BVH &b, Mesh &m, index_t nodeIdx) {
   BVHNode &node = b.nodes[nodeIdx];
   if (node.nPrimitives == 0)
-    printf("FAULTY NODE : N°%lu\n", nodeIdx);
+    printf("FAULTY NODE : N°%u\n", nodeIdx);
   assert(node.nPrimitives > 0);
   AABB bb = AABB({real3(10e30, 10e30, 10e30), real3(-10e30, -10e30, -10e30)});
   for (int i = node.firstPrimitive; i < node.firstPrimitive + node.nPrimitives;
        i++) {
     index_t j = b.objects[i].index;
-    bb.add(tm.vertices[tm.triangles[3 * j]]);
-    bb.add(tm.vertices[tm.triangles[3 * j + 1]]);
-    bb.add(tm.vertices[tm.triangles[3 * j + 2]]);
+    m.add_to_bb(j, bb);
   }
   node.bb = bb;
 }
 
-template <typename T> void swap(T *arr, int i, int j) {
+template <typename T> __host__ __device__ void swap(T *arr, int i, int j) {
   T temp = arr[i];
   arr[i] = arr[j];
   arr[j] = temp;
 }
 
-float evaluateSAH(BVH &b, TriangleMesh &tm, BVHNode &node, int axis,
-                  float splitPos) {
+template <typename Mesh>
+__host__ __device__ float evaluateSAH(BVH &b, Mesh &m, BVHNode &node, int axis,
+                                      float splitPos) {
   AABB left = AABB({real3(10e30, 10e30, 10e30), real3(-10e30, -10e30, -10e30)});
   AABB right =
       AABB({real3(10e30, 10e30, 10e30), real3(-10e30, -10e30, -10e30)});
@@ -56,13 +57,9 @@ float evaluateSAH(BVH &b, TriangleMesh &tm, BVHNode &node, int axis,
     index_t j = b.objects[i].index;
     if (b.objects[i].centroid[axis] < splitPos) {
       leftCount++;
-      left.add(tm.vertices[tm.triangles[3 * j]]);
-      left.add(tm.vertices[tm.triangles[3 * j + 1]]);
-      left.add(tm.vertices[tm.triangles[3 * j + 2]]);
+      m.add_to_bb(j, left);
     } else {
-      right.add(tm.vertices[tm.triangles[3 * j]]);
-      right.add(tm.vertices[tm.triangles[3 * j + 1]]);
-      right.add(tm.vertices[tm.triangles[3 * j + 2]]);
+      m.add_to_bb(j, right);
     }
   }
   float cost =
@@ -70,14 +67,15 @@ float evaluateSAH(BVH &b, TriangleMesh &tm, BVHNode &node, int axis,
   return (cost > 0) ? cost : 10e30f;
 }
 
-void subdivide(BVH &b, TriangleMesh &tm, index_t nodeIdx) {
+template <typename Mesh>
+__host__ __device__ void subdivide(BVH &b, Mesh &m, index_t nodeIdx) {
   BVHNode &node = b.nodes[nodeIdx];
 
 // We split using the SAH criteria if it is defined
 #ifdef SAH
   int axis = -1;
   real splitPos = 0, cost = 10e30f;
-  // We iterate over each direction and each triangle and calculate the SAH
+  // We iterate over each direction and each primitive and calculate the SAH
   for (int a = 0; a < 3; a++)
     for (int i = 0; i < node.nPrimitives; i++) {
       BVHObj o = b.objects[i + node.firstPrimitive];
@@ -92,7 +90,7 @@ void subdivide(BVH &b, TriangleMesh &tm, index_t nodeIdx) {
 
 #else
   if (node.nPrimitives <= 2) {
-    // If there are one or two triangles left : this is considered a leaf
+    // If there are one or two primitives left : this is considered a leaf
     return;
   }
   // For now we split in half
@@ -102,15 +100,15 @@ void subdivide(BVH &b, TriangleMesh &tm, index_t nodeIdx) {
   real splitPos = node.bb.m[axis] + size[axis] * .5f;
 #endif
 
-  // We sort the triangle list in place
+  // We sort the primitive list in place
   int mini = node.firstPrimitive;         // First valid index
   int maxi = mini + node.nPrimitives - 1; // Last valid index
   while (mini <= maxi) {
     if (b.objects[mini].centroid[axis] < splitPos)
-      // This triangle can stay here
+      // This primitive can stay here
       mini++;
     else {
-      // We swap the triangle with the last non inspected one
+      // We swap the primitive with the last non inspected one
       swap(b.objects, mini, maxi--);
     }
   }
@@ -132,8 +130,8 @@ void subdivide(BVH &b, TriangleMesh &tm, index_t nodeIdx) {
   node.nPrimitives = 0;
 
   // We now update node bounds
-  updateNodeBounds(b, tm, node.left);
-  updateNodeBounds(b, tm, node.left + 1);
-  subdivide(b, tm, node.left);
-  subdivide(b, tm, node.left + 1);
+  updateNodeBounds(b, m, node.left);
+  updateNodeBounds(b, m, node.left + 1);
+  subdivide(b, m, node.left);
+  subdivide(b, m, node.left + 1);
 }

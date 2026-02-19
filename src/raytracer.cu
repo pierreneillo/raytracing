@@ -11,266 +11,12 @@
 uint w = 1920;
 uint h = 1080;
 float aspect = (float)w / (float)h;
-uint recursion_depth = 2;
+uint recursion_depth = 1;
 
 glm::mat4x4 RCamera::matrix() {
   return glm::perspective(glm::radians(fov), aspect, near, far) *
          glm::lookAt(glm::vec3(eye), glm::vec3(at), glm::vec3(up));
 }
-
-// #############
-// #    Hit    #
-// #############
-
-// used to store hits
-struct Hit {
-  real3 p;         // Position
-  real3 n;         // Normal
-  float t;         // Parameter of the ray
-  bool front_face; // Tells whether the ray has hit the object from the outside
-  int kO;          // Index (or hash) of the hit object
-  int kP;          // Index (or hash) of the hit primitive
-};
-
-// ##############
-// #  Interval  #
-// ##############
-
-struct Interval {
-  __host__ __device__ Interval(float s, float e) : s(s), e(e) {};
-  float s, e;
-  __host__ __device__ static Interval make(float a, float b) {
-    return (a < b) ? Interval(a, b) : Interval(b, a);
-  };
-  __host__ __device__ bool isEmpty() { return s > e; }
-  __host__ __device__ __forceinline__ bool contains(float t) {
-    return s <= t && t <= e;
-  }
-  __host__ __device__ bool overlaps(Interval other) {
-    return s <= other.e && other.s <= e;
-  }
-  __host__ __device__ static Interval intersection(Interval a, Interval b) {
-    if (a.overlaps(b)) {
-      Interval c = Interval(max(a.s, b.s), min(a.e, b.e));
-      return c;
-    }
-    return Interval(1, 0);
-  };
-};
-
-struct Ray {
-  __device__ Ray(real3 eye, real3 dir) : eye(eye), dir(dir) {};
-  __device__ real3 at(real t) { return eye + t * dir; };
-  __device__ bool hits(Sphere s, Interval i, Hit &hit) {
-    // Computation of the intersection with the sphere
-    // Given P(t) = at(r,t), we have an intersection along the ray iff
-    // there is a t > 0 such as (C - P(t))·(C - P(t)) == r²
-    // This can be written (C - eye)·(C - eye) - 2 t (C - eye)·direction + t²
-    // direction·direction = r² It is a 2nd degree equation, we solve for t, and
-    // deduce there is one or more intersections iff delta = 4 ((C -
-    // eye)·direction)² - 4 (|C - eye|² - r²) >= 0
-
-    // C - eye
-    real3 cme = s.C - eye;
-    // h = -2b
-    float h = dot(cme, dir);
-    float c = dot(cme, cme) - s.r * s.r;
-    float delta = h * h - c;
-
-    if (delta > 0) {
-      float t = h - sqrt(delta);
-      if (i.contains(t)) {
-        hit.p = at(t);
-        // The normal is simply the center to point vector, normalized
-        hit.n = normalized(hit.p - s.C);
-        hit.t = t;
-        // We check whether the ray has hit the sphere from the inside
-        hit.front_face = dot(dir, hit.n) < 0;
-        // If it is the case, we change the normal to point the other way
-        // hit.n = hit.front_face ? hit.n : -hit.n;
-        return true;
-      } else
-        return false;
-    } else
-      return false;
-  }
-
-  __device__ bool hits(Triangle tri, Interval i, Hit &hit) {
-    // Implementation of the Möller-Trumbore algorithm
-    real3 e1 = tri.v2 - tri.v1;
-    real3 e2 = tri.v3 - tri.v1;
-    real3 rxe2 = cross(dir, e2);
-    float det = dot(e1, rxe2);
-
-    // We consider the ray is parallel
-    if (abs(det) < TRIANGLE_EPSILON)
-      return false;
-
-    float idet = 1.0 / det;
-    real3 s = eye - tri.v1;
-    float u = idet * dot(s, rxe2);
-
-    if (u < 0.0 || u > 1.0)
-      return false;
-
-    real3 sxe1 = cross(s, e1);
-    float v = idet * dot(dir, sxe1);
-
-    if (v < 0.0 || u + v > 1.0)
-      return false;
-
-    // At this stage we can compute t to find out where the intersection point
-    // is on the line.
-    float t = idet * dot(e2, sxe1);
-
-    if (i.contains(t)) {
-      // Yeepee, there is an intersection
-      hit.t = t;
-      hit.p = eye + dir * t;
-
-      // Barycentric interpolation for the normal, with our calculated weights
-      float w = 1.0 - u - v;
-      hit.n = normalized(w * tri.n1 + u * tri.n2 + v * tri.n3);
-      // We check whether the ray has hit the triangle from the front or back
-      // face
-      hit.front_face = dot(dir, hit.n) < 0;
-      // If it is the case, we change the normal to point the other way
-      hit.n = hit.front_face ? hit.n : -hit.n;
-      return true;
-    }
-
-    return false;
-  }
-
-  __device__ bool hits(AABB bb, Interval i, Hit &hit) {
-    // We first eliminate on a simple criteria
-    real3 d = dir;
-    real3 o = eye;
-    if ((d.x == 0 && (bb.m.x > d.x || bb.M.x < d.x)) ||
-        (d.y == 0 && (bb.m.y > d.y || bb.M.y < d.y)) ||
-        (d.z == 0 && (bb.m.z > d.z || bb.M.z < d.z)))
-      return false;
-    // We calculate t intervals in which the ray intersects with each of the
-    // axis
-    Interval j = i;
-    for (int dim = 0; dim < 3; dim++) {
-      // The ray has equation O + tD and the planes are at [dim] = m and [dim] =
-      // M Therefore the two hit times respect O + tD = m => t = (m - O)/D, and
-      // idem t = (M - O)/D
-      float t1 = (bb.M[dim] - o[dim]) / d[dim];
-      float t2 = (bb.m[dim] - o[dim]) / d[dim];
-      if (!j.overlaps(Interval::make(t1, t2)) || j.isEmpty())
-        return false;
-      j = Interval::intersection(j, Interval::make(t1, t2));
-    }
-    if (j.isEmpty())
-      return false;
-    else {
-      hit.t = j.s;
-      hit.p = at(j.s);
-      hit.n = bb.normal(hit.p);
-      hit.front_face = dot(hit.n, d) < 0;
-      hit.n = hit.front_face ? hit.n : -hit.n;
-      return true;
-    }
-  }
-
-  __device__ bool hits(Object o, Interval i, Hit &hit, const int last_kP) {
-    bool did_hit = false;
-    float closest_now = i.e;
-    switch (o.type) {
-    case TRIANGLE: {
-      // BVH Traversal
-      index_t stack[MAX_TREE_DEPTH];
-      index_t stackPtr = 0;
-      stack[stackPtr++] = 0;
-
-      Hit idc_hit;
-      while (stackPtr > 0) {
-        if (stackPtr >= MAX_TREE_DEPTH)
-          printf("Stack depth exceeded\n");
-        int nodeIdx = stack[--stackPtr];
-        // int depth = depthStack[stackPtr];
-        BVHNode &node = o.b.nodes[nodeIdx];
-        // If we didn't hit the box, we directly pass to the next box on the
-        // stack
-        if (!hits(node.bb, Interval(i.s, closest_now), idc_hit))
-          continue;
-
-        // If we did hit we branch depending if the node is a leaf
-        if (node.nPrimitives > 0) {
-          // Leaf node
-          for (int k = node.firstPrimitive;
-               k < node.nPrimitives + node.firstPrimitive; k++) {
-            Triangle t = o.buildTriangle(o.b.objects[k].index);
-            if (k != last_kP && hits(t, Interval(i.s, closest_now), hit)) {
-              did_hit = true;
-              closest_now = hit.t;
-              hit.kP = k;
-            }
-          }
-        } else {
-          // Internal node, we add children to stack
-          // We order the two children nodes to improve performances
-          Hit left_hit;
-          Hit right_hit;
-          if (hits(o.b.nodes[node.left].bb, Interval(i.s, closest_now),
-                   left_hit)) {
-            if (hits(o.b.nodes[node.left + 1].bb, Interval(i.s, closest_now),
-                     right_hit)) {
-              // Both nodes have a hit, we put the closest up on the stack
-              if (left_hit.t < right_hit.t) {
-                stack[stackPtr++] = node.left + 1;
-                stack[stackPtr++] = node.left;
-              } else {
-                stack[stackPtr++] = node.left;
-                stack[stackPtr++] = node.left + 1;
-              }
-            } else {
-              // Right node has not hit, we only put the left one on the stack
-              stack[stackPtr++] = node.left;
-            }
-          } else {
-            // Left node has not hit, we only put the right one on the stack
-            stack[stackPtr++] = node.left + 1;
-          }
-        }
-      }
-      break;
-    }
-    case SPHERE: {
-      for (int k = 0; k < o.nPrimitives; k++) {
-        Sphere s = o.data.spheres[k];
-        if (hits(s, Interval(i.s, closest_now), hit)) {
-          did_hit = true;
-          closest_now = hit.t;
-          hit.kP = k;
-        }
-      }
-      break;
-    }
-    }
-    return did_hit;
-  }
-
-  __device__ bool nearestHit(Object *objects, int nObjects, Interval i,
-                             Hit &hit, Hit last_hit = {.kO = -1}) {
-
-    bool did_hit = false;
-    float closest_now = i.e;
-    for (int k = 0; k < nObjects; k++) {
-      if (hits(objects[k], Interval(i.s, closest_now), hit,
-               (last_hit.kO == k) ? last_hit.kP : -1)) {
-        did_hit = true;
-        hit.kO = k;
-        closest_now = hit.t;
-      }
-    }
-    return did_hit;
-  }
-  real3 eye;
-  real3 dir;
-};
 
 __device__ real3 defaultShade(Material material) {
   return material.ambient * material.kA;
@@ -423,8 +169,8 @@ void reallocDeviceFramebuffer() {
   cudaMalloc(&scene.d_framebuffer, sizeof(float4) * w * h);
 }
 
-void init_raytracing(RCamera cam, LightSource *lights, int nLights,
-                     Object *objects, int nObjects, float4 *framebuffer) {
+Object *init_raytracing(RCamera cam, LightSource *lights, int nLights,
+                        Object *objects, int nObjects, float4 *framebuffer) {
   // Calculation of camera matrix
   scene.cam = cam;
   scene.nLights = nLights;
@@ -440,12 +186,12 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
 
   gpuErrchk(cudaMalloc(&scene.d_invCamMat, 16 * sizeof(float)));
   gpuErrchk(cudaMemcpy(scene.d_invCamMat, h_invCamMat, 16 * sizeof(float),
-                       cudaMemcpyHostToDevice));
+                       cudaMemcpyDefault));
   gpuErrchk(cudaMalloc(&scene.d_framebuffer, sizeof(float4) * w * h));
 
   gpuErrchk(cudaMalloc(&scene.d_lightSource, sizeof(LightSource) * nLights));
   gpuErrchk(cudaMemcpy(scene.d_lightSource, lights,
-                       sizeof(LightSource) * nLights, cudaMemcpyHostToDevice));
+                       sizeof(LightSource) * nLights, cudaMemcpyDefault));
 
   // Host-allocated memory pointing to device-allocated memory
   Object *dh_objects = (Object *)malloc(sizeof(Object) * nObjects);
@@ -462,7 +208,7 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
                            sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1)));
       gpuErrchk(cudaMemcpy(d_nodes, cpu_obj.b.nodes,
                            sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1),
-                           cudaMemcpyHostToDevice));
+                           cudaMemcpyDefault));
       gpu_obj.b.nodes = d_nodes;
     }
     if (cpu_obj.b.objects != nullptr) {
@@ -470,19 +216,25 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
       gpuErrchk(cudaMalloc(&d_objects, sizeof(BVHObj) * cpu_obj.nPrimitives));
       gpuErrchk(cudaMemcpy(d_objects, cpu_obj.b.objects,
                            sizeof(BVHObj) * cpu_obj.nPrimitives,
-                           cudaMemcpyHostToDevice));
+                           cudaMemcpyDefault));
       gpu_obj.b.objects = d_objects;
     }
 
     switch (cpu_obj.type) {
     case SPHERE: {
-      // We only need to reallocate the Sphere*
-      Sphere *d_spheres;
-      gpuErrchk(cudaMalloc(&d_spheres, sizeof(Sphere) * cpu_obj.nPrimitives));
-      gpuErrchk(cudaMemcpy(d_spheres, cpu_obj.data.spheres,
-                           sizeof(Sphere) * cpu_obj.nPrimitives,
-                           cudaMemcpyHostToDevice));
-      dh_objects[i].data.spheres = d_spheres;
+      // We only need to reallocate the SphereMesh
+      real3 *d_centers;
+      size_t cSize = sizeof(real3) * cpu_obj.data.sphereMesh.nPrimitives;
+      gpuErrchk(cudaMalloc(&d_centers, cSize));
+      gpuErrchk(cudaMemcpy(d_centers, cpu_obj.data.sphereMesh.C, cSize,
+                           cudaMemcpyDefault));
+      gpu_obj.data.sphereMesh.C = d_centers;
+      float *d_radius;
+      size_t rSize = sizeof(float) * cpu_obj.data.sphereMesh.nPrimitives;
+      gpuErrchk(cudaMalloc(&d_radius, rSize));
+      gpuErrchk(cudaMemcpy(d_radius, cpu_obj.data.sphereMesh.r, rSize,
+                           cudaMemcpyDefault));
+      gpu_obj.data.sphereMesh.r = d_radius;
       break;
     }
     case TRIANGLE: {
@@ -491,21 +243,21 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
                            sizeof(real3) * cpu_obj.data.triangleMesh.nVerts));
       gpuErrchk(cudaMemcpy(d_verts, cpu_obj.data.triangleMesh.vertices,
                            sizeof(real3) * cpu_obj.data.triangleMesh.nVerts,
-                           cudaMemcpyHostToDevice));
+                           cudaMemcpyDefault));
       real3 *d_norm;
       gpuErrchk(cudaMalloc(&d_norm,
                            sizeof(real3) * cpu_obj.data.triangleMesh.nVerts));
       gpuErrchk(cudaMemcpy(d_norm, cpu_obj.data.triangleMesh.normals,
                            sizeof(real3) * cpu_obj.data.triangleMesh.nVerts,
-                           cudaMemcpyHostToDevice));
+                           cudaMemcpyDefault));
       index_t *d_tris;
       gpuErrchk(cudaMalloc(&d_tris, sizeof(index_t) * cpu_obj.nPrimitives * 3));
       gpuErrchk(cudaMemcpy(d_tris, cpu_obj.data.triangleMesh.triangles,
                            sizeof(index_t) * cpu_obj.nPrimitives * 3,
-                           cudaMemcpyHostToDevice));
-      dh_objects[i].data.triangleMesh = {
-          d_verts, d_norm, cpu_obj.data.triangleMesh.nVerts, d_tris,
-          cpu_obj.data.triangleMesh.nTriangles};
+                           cudaMemcpyDefault));
+      gpu_obj.data.triangleMesh = {d_verts, d_norm,
+                                   cpu_obj.data.triangleMesh.nVerts, d_tris,
+                                   cpu_obj.data.triangleMesh.nPrimitives};
 
       break;
     }
@@ -515,8 +267,160 @@ void init_raytracing(RCamera cam, LightSource *lights, int nLights,
   // Device-allocated memory pointing to device-allocated memory
   gpuErrchk(cudaMalloc(&scene.d_objects, sizeof(Object) * nObjects));
   gpuErrchk(cudaMemcpy(scene.d_objects, dh_objects, sizeof(Object) * nObjects,
-                       cudaMemcpyHostToDevice));
-  free(dh_objects);
+                       cudaMemcpyDefault));
+  return dh_objects;
+}
+
+// Sync raytracing and particle sim
+void syncSphereObjectAndRebuildBVH(index_t objectIdx,
+                                   const real3 *d_particlePositions,
+                                   index_t nParticles) {
+  if (objectIdx >= scene.nObjects || d_particlePositions == nullptr ||
+      nParticles == 0)
+    return;
+
+  Object *h_obj_ptr = (Object *)malloc(sizeof(Object));
+  gpuErrchk(cudaMemcpy(h_obj_ptr, scene.d_objects + objectIdx, sizeof(Object),
+                       cudaMemcpyDefault));
+  Object &h_obj = *h_obj_ptr;
+
+  if (h_obj.type != SPHERE) {
+    free(h_obj_ptr);
+    return;
+  }
+
+  index_t nSphere = h_obj.data.sphereMesh.nPrimitives;
+  if (nSphere != nParticles) {
+    fprintf(
+        stderr,
+        "syncSphereObjectAndRebuildBVH: particle count mismatch (%u vs %u)\n",
+        nParticles, nSphere);
+    fflush(stderr);
+    free(h_obj_ptr);
+    return;
+  }
+
+  // We unfortunately need to copy a lot of data CPU side to rebuild BVH
+  real3 *h_centers = new real3[nParticles];
+  float *h_radii = new float[nParticles];
+
+  gpuErrchk(cudaMemcpy(h_centers, d_particlePositions,
+                       sizeof(real3) * nParticles, cudaMemcpyDefault));
+  gpuErrchk(cudaMemcpy(h_radii, h_obj.data.sphereMesh.r,
+                       sizeof(float) * nParticles, cudaMemcpyDefault));
+
+  gpuErrchk(cudaMemcpy(h_obj.data.sphereMesh.C, h_centers,
+                       sizeof(real3) * nParticles, cudaMemcpyDefault));
+
+  SphereMesh h_mesh = {h_centers, h_radii, nParticles};
+  BVH h_bvh = buildBVH(h_mesh);
+
+  gpuErrchk(cudaMemcpy(h_obj.b.nodes, h_bvh.nodes,
+                       sizeof(BVHNode) * (2 * nParticles + 1),
+                       cudaMemcpyDefault));
+  gpuErrchk(cudaMemcpy(h_obj.b.objects, h_bvh.objects,
+                       sizeof(BVHObj) * nParticles, cudaMemcpyDefault));
+
+  delete[] h_bvh.nodes;
+  delete[] h_bvh.objects;
+  delete[] h_centers;
+  delete[] h_radii;
+  free(h_obj_ptr);
+}
+
+void updateSphereObjectAndRebuildBVH(index_t objectIdx,
+                                     const real3 *h_particlePositions,
+                                     index_t nParticles) {
+  if (objectIdx >= scene.nObjects || h_particlePositions == nullptr ||
+      nParticles == 0)
+    return;
+
+  Object *h_obj_ptr = (Object *)malloc(sizeof(Object));
+  gpuErrchk(cudaMemcpy(h_obj_ptr, scene.d_objects + objectIdx, sizeof(Object),
+                       cudaMemcpyDefault));
+  Object &h_obj = *h_obj_ptr;
+
+  if (h_obj.type != SPHERE) {
+    free(h_obj_ptr);
+    return;
+  }
+
+  index_t nSphere = h_obj.data.sphereMesh.nPrimitives;
+  if (nSphere != nParticles) {
+    fprintf(stderr,
+            "updateSphereObjectAndRebuildBVH: particle count mismatch (%u vs "
+            "%u)\n",
+            nParticles, nSphere);
+    fflush(stderr);
+    free(h_obj_ptr);
+    return;
+  }
+
+  gpuErrchk(cudaMemcpy(h_obj.data.sphereMesh.C, h_particlePositions,
+                       sizeof(real3) * nParticles, cudaMemcpyDefault));
+
+  real3 *h_centers = new real3[nParticles];
+  float *h_radii = new float[nParticles];
+  for (index_t i = 0; i < nParticles; i++) {
+    h_centers[i] = h_particlePositions[i];
+  }
+
+  gpuErrchk(cudaMemcpy(h_radii, h_obj.data.sphereMesh.r,
+                       sizeof(float) * nParticles, cudaMemcpyDefault));
+
+  SphereMesh h_mesh = {h_centers, h_radii, nParticles};
+  BVH h_bvh = buildBVH(h_mesh);
+
+  gpuErrchk(cudaMemcpy(h_obj.b.nodes, h_bvh.nodes,
+                       sizeof(BVHNode) * (2 * nParticles + 1),
+                       cudaMemcpyDefault));
+  gpuErrchk(cudaMemcpy(h_obj.b.objects, h_bvh.objects,
+                       sizeof(BVHObj) * nParticles, cudaMemcpyDefault));
+
+  delete[] h_bvh.nodes;
+  delete[] h_bvh.objects;
+  delete[] h_centers;
+  delete[] h_radii;
+  free(h_obj_ptr);
+}
+
+void replaceObjectWithSphere(index_t objectIdx, const Object &cpu_obj) {
+  if (objectIdx >= scene.nObjects || cpu_obj.type != SPHERE)
+    return;
+
+  Object gpu_obj = cpu_obj;
+
+  real3 *d_centers = nullptr;
+  size_t cSize = sizeof(real3) * cpu_obj.data.sphereMesh.nPrimitives;
+  gpuErrchk(cudaMalloc(&d_centers, cSize));
+  gpuErrchk(cudaMemcpy(d_centers, cpu_obj.data.sphereMesh.C, cSize,
+                       cudaMemcpyDefault));
+  gpu_obj.data.sphereMesh.C = d_centers;
+
+  float *d_radius = nullptr;
+  size_t rSize = sizeof(float) * cpu_obj.data.sphereMesh.nPrimitives;
+  gpuErrchk(cudaMalloc(&d_radius, rSize));
+  gpuErrchk(cudaMemcpy(d_radius, cpu_obj.data.sphereMesh.r, rSize,
+                       cudaMemcpyDefault));
+  gpu_obj.data.sphereMesh.r = d_radius;
+
+  BVHNode *d_nodes = nullptr;
+  gpuErrchk(
+      cudaMalloc(&d_nodes, sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1)));
+  gpuErrchk(cudaMemcpy(d_nodes, cpu_obj.b.nodes,
+                       sizeof(BVHNode) * (2 * cpu_obj.nPrimitives + 1),
+                       cudaMemcpyDefault));
+  gpu_obj.b.nodes = d_nodes;
+
+  BVHObj *d_objects = nullptr;
+  gpuErrchk(cudaMalloc(&d_objects, sizeof(BVHObj) * cpu_obj.nPrimitives));
+  gpuErrchk(cudaMemcpy(d_objects, cpu_obj.b.objects,
+                       sizeof(BVHObj) * cpu_obj.nPrimitives,
+                       cudaMemcpyDefault));
+  gpu_obj.b.objects = d_objects;
+
+  gpuErrchk(cudaMemcpy(scene.d_objects + objectIdx, &gpu_obj, sizeof(Object),
+                       cudaMemcpyDefault));
 }
 
 void raytrace(float4 *framebuffer) {
@@ -532,7 +436,7 @@ void raytrace(float4 *framebuffer) {
   }
 
   gpuErrchk(cudaMemcpy(scene.d_invCamMat, h_invCamMat, 16 * sizeof(float),
-                       cudaMemcpyHostToDevice));
+                       cudaMemcpyDefault));
 
   uint b_size = sqrt(MAX_BLOCK_SIZE);
   dim3 block_size = {b_size, b_size, 1};

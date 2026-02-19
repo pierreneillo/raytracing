@@ -2,6 +2,7 @@
 #define UTILS_H
 #include <cuda_runtime_api.h>
 #include <driver_types.h>
+
 #include <glad/glad.h>
 
 #include <GL/gl.h>
@@ -24,13 +25,18 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include "raytracer.cuh"
 
+#include "particles_calculation.cuh"
+
 // *************
 // *  Globals  *
 // *************
+
+#define PARTICLE_SPHERE_RADIUS .25
 
 enum resize_policy {
   EXTEND,
@@ -38,49 +44,65 @@ enum resize_policy {
   PREFER_WIDTH,
   PREFER_HEIGHT,
 };
-resize_policy policy = EXTEND;
+extern resize_policy policy;
 
-float TARGET_FPS = 30.f;
+extern float TARGET_FPS;
 
-GLFWwindow *window;
-GLuint program;
+extern GLFWwindow *window;
+extern GLuint program;
 
 // Describe wether the user is moving the camera
-bool moving = false;
+extern bool moving;
 // Position of the mouse at the start of the move
-glm::vec2 moveOrigin;
+extern glm::vec2 moveOrigin;
+
+extern bool playing;
+
+// ***************************
+// * Multi-buffer management *
+// ***************************
+
+// Multi buffering for greater performances, we function with a minimum of 3
+// buffers :
+// - 2 buffers for CUDA (one to read from, one to write to, we need to keep the
+// old values because they have not been drawn yet)
+// - 1 buffer for OpenGL (to render)
+extern ind N_BUFFERS;
+extern ind current_read_buffer;
+
+inline ind getReadInd() { return current_read_buffer; }
+
+inline ind getWriteInd() { return (current_read_buffer + 1) % N_BUFFERS; }
+
+inline ind getDrawInd() { return (current_read_buffer - 1) % N_BUFFERS; }
+
+inline void incrementBufferInd() {
+  current_read_buffer = (current_read_buffer + 1) % N_BUFFERS;
+}
 
 // ********************
 // * Helper functions *
 // ********************
 
+extern bool recording;
+
 // Global pointer for the pipe
-FILE *ffmpegPipe = nullptr;
+extern FILE *ffmpegPipe;
 
-void startRecording(int width, int height) {
-  // Command to record at 60fps, yuv420p format for compatibility
-  std::string cmd =
-      "ffmpeg  -y -f rawvideo -pix_fmt rgb24 -s " + std::to_string(width) +
-      "x" + std::to_string(height) + " -r " + std::to_string(TARGET_FPS) +
-      " -i - -vf \"vflip\" -c:v libx264 -preset fast -crf 18 -pix_fmt "
-      "yuv420p output.mp4";
-
-  ffmpegPipe = popen(cmd.c_str(), "w");
-}
+void startRecording(int width, int height);
 
 // Inside the main loop, after glClear and rendering particles
-void recordFrame(int width, int height) {
-  if (!ffmpegPipe)
-    return;
+void recordFrame(int width, int height);
 
-  // Allocate a buffer for the RGB pixel
-  static std::vector<unsigned char> pixels(3 * width * height);
+TriangleMesh loadMesh(std::string filename);
 
-  // Read pixels from the OpenGL back buffer
-  glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+index_t initFetcher(const std::string &filename);
 
-  // Write the pixel data to the FFmpeg pipe
-  fwrite(pixels.data(), 1, pixels.size(), ffmpegPipe);
-}
+real3 *fetchAndTransformPositions(real scale, real3 translation);
+
+bool fetchAndTransformPositionsInPlace(real3 *positions, real scale,
+                                       real3 translation);
+
+void closeFetcher();
 
 #endif // UTILS_H
