@@ -14,3 +14,5 @@ raytracer
 .clang*
 *positions.txt
 *.mp4
+commands.txt
+include/glm

@@ -12,10 +12,9 @@ template <typename Mesh> __host__ __device__ BVH buildBVH(Mesh m) {
   BVHNode &root = b.nodes[0];
   root.firstPrimitive = 0;
   root.nPrimitives = m.nPrimitives;
-  printf("Starting building BVH for %u primitives...\n", m.nPrimitives);
+  printf("Building BVH for %u primitives...\n", m.nPrimitives);
   updateNodeBounds(b, m, 0);
   b.nodes_used++;
-  printf("Now recursing...\n");
   subdivide(b, m, 0);
   return b;
 }

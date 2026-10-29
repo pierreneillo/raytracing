@@ -21,8 +21,8 @@ inline void gpuAssert(cudaError_t code, const char *file, int line,
 * Constants *
 \***********/
 
-extern uint w;
-extern uint h;
+extern int w;
+extern int h;
 extern float aspect;
 
 extern uint recursion_depth;

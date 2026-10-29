@@ -8,10 +8,12 @@
 #include <glm/glm.hpp>
 
 /*Raytracer in cuda*/
-uint w = 1920;
-uint h = 1080;
+int w = 1920;
+int h = 1080;
+uint sampling_factor = 3;
+__managed__ uint samples_per_pixel;
 float aspect = (float)w / (float)h;
-uint recursion_depth = 1;
+uint recursion_depth = 2;
 
 glm::mat4x4 RCamera::matrix() {
   return glm::perspective(glm::radians(fov), aspect, near, far) *
@@ -42,7 +44,6 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
 
     real3 v = -current_ray.dir;
 
-    // Shadow ray
     for (int i = 0; i < nLights; i++) {
       LightSource light = lights[i];
       // Shadow ray
@@ -83,7 +84,7 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
 
     if (depth < recursion_depth) {
       // We trace reflected ray and refracted ray if needed
-      // Refraction dir is the symmetric of ray dir relative to normal:
+      // Reflection dir is the symmetric of ray dir relative to normal:
       real3 reflected_dir =
           current_ray.dir - 2 * hit.n * dot(hit.n, current_ray.dir);
       current_ray = Ray(hit.p, reflected_dir);
@@ -99,30 +100,52 @@ __global__ void raytraceKernel(RCamera cam, LightSource *lights, uint nLights,
                                Object *objects, uint nObjects,
                                const float *__restrict__ invCameraMat,
                                float4 *framebuffer, uint w, uint h,
-                               uint recursion_depth) {
+                               uint recursion_depth,
+                               real2 *__restrict__ sample_offset) {
+
+  __shared__ real3 pixels[MAX_BLOCK_SIZE];
+  if (threadIdx.z == 0)
+    pixels[threadIdx.x + blockDim.y * threadIdx.y] = real3();
+
+  __syncthreads();
   uint2 screen_coords = make_uint2(blockIdx.x * blockDim.x + threadIdx.x,
                                    blockIdx.y * blockDim.y + threadIdx.y);
-  if (screen_coords.x >= w || screen_coords.y >= h)
-    return;
 
-  // WORLD POS CALCULATION
-  // We first transform screen coords into NDC at near plane
-  float4 clip_space_pos = make_float4(
-      2 * ((float)(screen_coords.x + .5f) / (float)w) - 1.f,
-      2 * ((float)(screen_coords.y + .5f) / (float)h) - 1.f, -1.0f, 1.0f);
-  // We then transform to world pos by using the inverse camera matrix
-  float4 worldPosH = mul(invCameraMat, clip_space_pos);
-  real3 worldPos = real3(worldPosH.x, worldPosH.y, worldPosH.z);
-  if (worldPosH.w != 0)
-    worldPos = worldPos / worldPosH.w;
+  bool valid = screen_coords.x < w && screen_coords.y < h;
+  if (valid) {
+    // WORLD POS CALCULATION
+    // We first transform screen coords into NDC at near plane
+    float4 clip_space_pos = make_float4(
+        2 * ((float)(screen_coords.x + .5f + sample_offset[threadIdx.z].x) /
+             (float)w) -
+            1.f,
+        2 * ((float)(screen_coords.y + .5f + sample_offset[threadIdx.z].y) /
+             (float)h) -
+            1.f,
+        -1.0f, 1.0f);
+    // We then transform to world pos by using the inverse camera matrix
+    float4 worldPosH = mul(invCameraMat, clip_space_pos);
+    real3 worldPos = real3(worldPosH.x, worldPosH.y, worldPosH.z);
+    if (worldPosH.w != 0)
+      worldPos = worldPos / worldPosH.w;
 
-  // The ray R(t) = eye_pos + t*ray_direction
-  real3 eye = cam.eye;
-  Ray r = Ray(eye, normalized(worldPos - eye));
+    // The ray R(t) = eye_pos + t*ray_direction
+    real3 eye = cam.eye;
+    Ray r = Ray(eye, normalized(worldPos - eye));
 
-  // Default pixel value
-  real3 pixel = shade(r, lights, nLights, objects, nObjects, recursion_depth);
-  imageStore(framebuffer, w, screen_coords, {pixel.x, pixel.y, pixel.z, 1.0f});
+    // Default pixel value
+    real3 pixel = shade(r, lights, nLights, objects, nObjects, recursion_depth);
+    uint idx = threadIdx.x + blockDim.y * threadIdx.y;
+    atomicAdd(&pixels[idx].x, pixel.x);
+    atomicAdd(&pixels[idx].y, pixel.y);
+    atomicAdd(&pixels[idx].z, pixel.z);
+  }
+  __syncthreads();
+  if (threadIdx.z == 0 && valid) {
+    uint idx = threadIdx.x + blockDim.y * threadIdx.y;
+    real3 sum = pixels[idx] / float(samples_per_pixel);
+    imageStore(framebuffer, w, screen_coords, {sum.x, sum.y, sum.z, 1.0f});
+  }
 }
 
 void imageWrite(float4 *framebuffer, const char *fn, int w, int h) {
@@ -172,6 +195,7 @@ void reallocDeviceFramebuffer() {
 Object *init_raytracing(RCamera cam, LightSource *lights, int nLights,
                         Object *objects, int nObjects, float4 *framebuffer) {
   // Calculation of camera matrix
+  samples_per_pixel = sampling_factor * sampling_factor;
   scene.cam = cam;
   scene.nLights = nLights;
   scene.nObjects = nObjects;
@@ -438,15 +462,33 @@ void raytrace(float4 *framebuffer) {
   gpuErrchk(cudaMemcpy(scene.d_invCamMat, h_invCamMat, 16 * sizeof(float),
                        cudaMemcpyDefault));
 
-  uint b_size = sqrt(MAX_BLOCK_SIZE);
-  dim3 block_size = {b_size, b_size, 1};
+  // We need to calculate sample offset, to store in an array and send to the
+  // raytracer, using a grid sampling
+  // TODO : Ideally, we should use rotated and scaled grid
+  // (https://en.wikipedia.org/wiki/Supersampling#Rotated_grid)
+  real2 *h_sample_offset = (real2 *)malloc(sizeof(real2) * samples_per_pixel);
+  for (int i = 0; i < sampling_factor; i++)
+    for (int j = 0; j < sampling_factor; j++)
+      h_sample_offset[i + sampling_factor * j] =
+          real2((float(i) + .5) / float(sampling_factor) - .5,
+                (float(j) + .5) / float(sampling_factor) - .5);
+
+  real2 *d_sample_offset;
+  gpuErrchk(cudaMalloc(&d_sample_offset, sizeof(real2) * samples_per_pixel));
+  gpuErrchk(cudaMemcpy(d_sample_offset, h_sample_offset,
+                       samples_per_pixel * sizeof(real2),
+                       cudaMemcpyHostToDevice));
+
+  uint b_size = sqrt(int(MAX_BLOCK_SIZE / samples_per_pixel));
+  dim3 block_size = {b_size, b_size, samples_per_pixel};
   dim3 grid_size = {(uint)ceil((float)w / (float)b_size),
                     (uint)ceil((float)h / (float)b_size), 1};
 
   raytraceKernel<<<grid_size, block_size>>>(
       scene.cam, scene.d_lightSource, scene.nLights, scene.d_objects,
       scene.nObjects, scene.d_invCamMat, scene.d_framebuffer, w, h,
-      recursion_depth);
+      recursion_depth, d_sample_offset);
+  gpuErrchk(cudaGetLastError());
   gpuErrchk(cudaDeviceSynchronize());
   gpuErrchk(cudaMemcpy(framebuffer, scene.d_framebuffer, sizeof(float4) * w * h,
                        cudaMemcpyDeviceToHost));

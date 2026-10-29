@@ -16,14 +16,6 @@ Camera *camPtr = nullptr;
 cudaGraphicsResource *current_pos_buffer;
 
 bool windowHasChanged = false;
-bool shouldSwapToWaterMonk = false;
-bool waterMonkActive = false;
-bool playSimulation = false;
-
-// We scale the texture to allow anti-aliasing on one end and low res on the
-// other
-// Scaling factor corresponds to raytraced texture width / actual window width
-float scaling_factor = 3;
 
 // *****************
 // *  Shader mgmt  *
@@ -79,8 +71,8 @@ GLuint createBasicProgram() {
 
 void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
   glViewport(0, 0, width, height);
-  w = width * scaling_factor;
-  h = height * scaling_factor;
+  w = width;
+  h = height;
   aspect = (float)width / (float)height;
   windowHasChanged = true;
 }
@@ -96,10 +88,6 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action,
                  int mods) {
   if (action == GLFW_PRESS && key == GLFW_KEY_H) {
     printHelp();
-  } else if (action == GLFW_PRESS && key == GLFW_KEY_Z) {
-    shouldSwapToWaterMonk = true;
-  } else if (action == GLFW_PRESS && key == GLFW_KEY_SPACE) {
-    playSimulation = !playSimulation;
   } else if ((action == GLFW_PRESS && key == GLFW_KEY_A) ||
              (action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)) {
     glfwSetWindowShouldClose(window, true);
@@ -228,71 +216,73 @@ int main() {
   program = createBasicProgram();
 
   // Setup the camera (which will always stay centered on the same point)
-  static Camera cam = Camera(real3(0, 1, 1. / glm::atan(glm::radians(22.5))),
-                             real3(0, 1., 0), real3(0, 1, 0), 45.f);
+  static Camera cam =
+      Camera(real3(0.2, 0, 4), real3(0, 0, 0), real3(0, 1, 0), 45.f);
 
   camPtr = &cam;
 
   RCamera rcam = {cam.eye, cam.at, cam.up, cam.fov, cam.near, cam.far, aspect};
 
+  /******************************
+   *         Cornell box         *
+   *******************************/
+
+  // The Cornell box is composed of a red wall on the left, a green wall on the
+  // right, and 3 white walls on bottom, top and back
+
+  glm::mat4 transform =
+      glm::translate(glm::mat4(1.0f), glm::vec3(-.2, -.8, .3));
+  transform =
+      glm::rotate(transform, (float)glm::radians(18.), glm::vec3(0, 1., 0));
+  transform = glm::scale(transform, glm::vec3(.2));
+
+  Object smallCube = Object(basicColoredMat(real3(1, 1, 1)),
+                            loadMesh("data/cube.obj", transform));
+
+  transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.5, -.6, -.3));
+  transform =
+      glm::rotate(transform, (float)glm::radians(18.), glm::vec3(0, 1., 0));
+  transform = glm::scale(transform, glm::vec3(.2, .4, .2));
+
+  Object bigCube = Object(basicColoredMat(real3(1, 1, 1)),
+                          loadMesh("data/cube.obj", transform));
+
+#define N_OBJ 7
+  Object objects[N_OBJ] = {
+      makePlane({-1, 0, 0}, 1, 0,
+                basicColoredMat(real3(1, 0, 0))), // Left red plane
+      makePlane({1, 0, 0}, 1, 0,
+                basicColoredMat(real3(0, 1, 0))), // Right green plane
+      makePlane({0, -1, 0}, 1, 1,
+                basicColoredMat(real3(1, 1, 1))), // Bottom white plane
+      makePlane({0, 1, 0}, 1, 1,
+                basicColoredMat(real3(1, 1, 1))), // Top white plane
+      makePlane({0, 0, -1}, 1, 2,
+                basicColoredMat(real3(1, 1, 1))), // Background white plane
+      smallCube,
+      bigCube};
+
   // Temporary setup
-#define N_LIGHTS 4
+#define N_LIGHTS 1
   LightSource lights[N_LIGHTS] = {
-      {real3(0., 3, 0.), 1.f, real3(1., 1., 1.), true},
-      {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
-      {real3(2., 1.5, 0.), 1.f, real3(1., .8, .3), true},
-      {real3(0., 1.12, 0.015), 1.f, real3(1., .8, .3), true},
+      {real3(0., 0.9, 0.), .5f, real3(1., 1., 1.), true},
+      // {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
+      // {real3(2., 1.5, 0.), 1.f, real3(1., .8, .3), true},
+      // {real3(0., 1.12, 0.015), 1.f, real3(1., .8, .3), true},
 
   };
-
-  Material planeMat = {
-      real3(1., 1., 1.), .1, real3(1., 1., 1.), .9, real3(1, 1, 1), .1, 32.,
-      PHONG_MATERIAL};
-
-  Material monkMaterial = {
-      real3(.3, .7, 1.), .1, real3(.3, .7, 1.), 1., real3(1, 1, 1), 0., 32.,
-      PHONG_MATERIAL};
-
-  int nTriangles;
-  TriangleMesh monkMesh = loadMesh("data/monk_high.obj");
-  Object monk = Object(monkMaterial, monkMesh);
-
-  // Water monk
-  real waterMonkScale = 30.9755;
-  real3 waterMonkTranslation = {10.2633, 2, 10.6204};
-  index_t nParticles = initFetcher("positions.txt");
-  if (nParticles == 0) {
-    fprintf(stderr,
-            "Could not read particle count from second_positions.txt\n");
-    return -1;
-  }
-  real3 *particleCenters =
-      fetchAndTransformPositions(waterMonkScale, waterMonkTranslation);
-  if (particleCenters == nullptr) {
-    fprintf(stderr, "Could not read initial particle positions\n");
-    closeFetcher();
-    return -1;
-  }
-  std::vector<real> radii = std::vector<real>(nParticles, .0081);
-  SphereMesh particles = {particleCenters, radii.data(), nParticles};
-  Object waterMonk = Object(monkMaterial, particles);
-#define N_OBJ 2
-  Object objects[N_OBJ] = {makePlane({0, -.06, 0}, 4, 1, planeMat), monk};
 
   GLuint vao;
   glCreateVertexArrays(1, &vao);
   glBindVertexArray(vao);
 
-  int iw, ih;
-  glfwGetFramebufferSize(window, &iw, &ih);
-  w = iw * scaling_factor;
-  h = ih * scaling_factor;
+  glfwGetFramebufferSize(window, &w, &h);
   aspect = (float)w / (float)h;
 
-  recording = true;
+  recording = false;
   TARGET_FPS = 100.f;
   if (recording)
-    startRecording(iw, ih);
+    startRecording(w, h);
 
   float4 *h_framebuffer = (float4 *)malloc(sizeof(float4) * w * h);
   Object *dh_objects =
@@ -317,32 +307,6 @@ int main() {
     // We update the camera's position at each frame
     rcam.eye = cam.eye;
 
-    if (shouldSwapToWaterMonk && !waterMonkActive) {
-      replaceObjectWithSphere(1, waterMonk);
-      waterMonkActive = true;
-      shouldSwapToWaterMonk = false;
-    }
-
-    if (waterMonkActive && playSimulation) {
-      if (!fetchAndTransformPositionsInPlace(particleCenters, waterMonkScale,
-                                             waterMonkTranslation)) {
-        closeFetcher();
-        // We try to reopen the simulation, to loop
-        if (initFetcher("positions.txt") == nParticles) {
-          if (!fetchAndTransformPositionsInPlace(
-                  particleCenters, waterMonkScale, waterMonkTranslation)) {
-            fprintf(stderr, "Could not stream particle positions\n");
-            playSimulation = false;
-            break;
-          }
-        } else {
-          fprintf(stderr, "Could not reopen positions.txt\n");
-          playSimulation = false;
-          break;
-        }
-      }
-      updateSphereObjectAndRebuildBVH(1, particleCenters, nParticles);
-    }
     if (windowHasChanged) {
       // If the geometry of the window has changed, we need to reallocate both
       // the texture and the cuda buffer
@@ -372,7 +336,7 @@ int main() {
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
     if (recording)
-      recordFrame(iw, ih);
+      recordFrame(w, h);
 
     glfwSwapBuffers(window);
     glfwPollEvents();
@@ -380,7 +344,6 @@ int main() {
   glDeleteVertexArrays(1, &vao);
   glDeleteProgram(program);
   closeFetcher();
-  delete[] particleCenters;
   end_raytracing();
   if (recording && ffmpegPipe)
     pclose(ffmpegPipe);

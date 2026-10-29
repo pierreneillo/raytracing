@@ -10,7 +10,7 @@ float TARGET_FPS = 30.f;
 
 bool moving = false;
 bool playing = false;
-bool recording = true;
+bool recording = false;
 
 glm::vec2 moveOrigin;
 
@@ -48,7 +48,7 @@ void recordFrame(int width, int height) {
   fwrite(pixels.data(), 1, pixels.size(), ffmpegPipe);
 }
 
-TriangleMesh loadMesh(std::string filename) {
+TriangleMesh loadMesh(std::string filename, glm::mat4 transform_matrix) {
   // Wrapper to the tinyobjloader
   tinyobj::ObjReaderConfig reader_config;
   reader_config.triangulate = true;
@@ -98,6 +98,17 @@ TriangleMesh loadMesh(std::string filename) {
       }
       indexes.push_back(index_pairs[ids]);
     }
+
+  // We transform the mesh if needed
+  glm::mat4 normal_transform_matrix = glm::inverseTranspose(transform_matrix);
+  for (int i = 0; i < vertices.size(); i++) {
+    vertices[i] = real3(
+        glm::vec3(transform_matrix *
+                  glm::vec4(vertices[i].x, vertices[i].y, vertices[i].z, 1.)));
+    normals[i] = real3(
+        glm::vec3(normal_transform_matrix *
+                  glm::vec4(normals[i].x, normals[i].y, normals[i].z, 1.)));
+  }
 
   // Lastly we copy the data in the designated buffers
   t.nVerts = vertices.size();
@@ -167,3 +178,7 @@ void closeFetcher() {
   if (fetcher.is_open())
     fetcher.close();
 }
+
+Material basicColoredMat(real3 color) {
+  return {color, .1, color, .9, color, 0, 32., PHONG_MATERIAL};
+};

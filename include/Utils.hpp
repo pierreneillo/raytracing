@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <glm/fwd.hpp>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <string>
@@ -94,7 +95,7 @@ void startRecording(int width, int height);
 // Inside the main loop, after glClear and rendering particles
 void recordFrame(int width, int height);
 
-TriangleMesh loadMesh(std::string filename);
+TriangleMesh loadMesh(std::string filename, glm::mat4 transform = glm::mat4());
 
 index_t initFetcher(const std::string &filename);
 
@@ -104,5 +105,7 @@ bool fetchAndTransformPositionsInPlace(real3 *positions, real scale,
                                        real3 translation);
 
 void closeFetcher();
+
+Material basicColoredMat(real3 color);
 
 #endif // UTILS_H

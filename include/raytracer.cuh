@@ -61,7 +61,7 @@ struct Object {
       return {v[t[j]], v[t[j + 1]], v[t[j + 2]],
               n[t[j]], n[t[j + 1]], n[t[j + 2]]};
     }
-    return {real3(), real3(), real3(), real3(), real3(), real3()};
+    return {};
   }
 };
 
