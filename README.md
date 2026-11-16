@@ -17,7 +17,7 @@ A quick overview of the raytracer's capabilities. The links lead to specific sec
 * **Blinn-Phong & Recursive Bounces:** Supports point and directional lights, hard shadow rays, and recursive specular reflections (see `shade()` in [raytracer.cu](src/raytracer.cu#L27-L110)).
 
 ### Architecture & Performance
-* **CUDA + OpenGL Pipeline:** Ray generation, BVH traversal, and shading run entirely in parallel on the GPU ([kernel wrapper](src/raytracer.cu#L463-L515)), writing to an OpenGL-backed framebuffer while C++ manages scene loading, window interaction and scene display.
+* **CUDA + OpenGL Pipeline:** Ray generation, BVH traversal, and shading run entirely in parallel on the GPU ([kernel wrapper](src/raytracer.cu#L463-L509)), writing to an OpenGL-backed framebuffer while C++ manages scene loading, window interaction and scene display.
 * **Performance:** Achieves **~40 FPS** at **1080p** with **9x SSAA** on the scene above (~5,000 primitives) on an NVIDIA RTX 5060 Laptop GPU.
 
 ## Running on your machine
