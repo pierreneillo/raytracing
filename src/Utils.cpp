@@ -180,5 +180,5 @@ void closeFetcher() {
 }
 
 Material basicColoredMat(real3 color) {
-  return {color, .1, color, .9, color, 0, 32., PHONG_MATERIAL};
+  return {color, .1, color, .9, color, 0., 32., PHONG_MATERIAL};
 };

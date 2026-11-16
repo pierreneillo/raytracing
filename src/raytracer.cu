@@ -47,23 +47,36 @@ __device__ real3 shade(Ray r, LightSource *lights, uint nLights,
     for (int i = 0; i < nLights; i++) {
       LightSource light = lights[i];
       // Shadow ray
-      real3 L = real3(light.pos) - hit.p;
+      real3 L;
+      if (light.t == POINT)
+        L = light.pos - hit.p;
+      else
+        L = -light.dir;
       Ray sr = {hit.p, normalized(L)};
       Hit obstacleHit;
       if (!sr.nearestHit(objects, nObjects, Interval(0, length(L)), obstacleHit,
                          last_hit)) {
         // There is light (yepee)
         // We shade with the material
-        real3 L = light.pos - hit.p;
+        real3 L;
+        if (light.t == POINT)
+          L = light.pos - hit.p;
+        else
+          L = -light.dir;
         float dist = length(L);
         real3 lv = L / dist;
         real3 h = normalized(lv + v); // Halfway vector for Blinn-Phong
 
-        // Distance Attenuation (in 1 / d²) to make it look realistic,
-        // incorporating intensity A small epsilon is added to prevent
-        // division by 0
-        float attenuation = light.intensity / (dist * dist + .001);
-
+        float attenuation = light.intensity;
+        if (light.t == POINT) {
+          // Distance Attenuation (with 3 factors: constant, linear and
+          // quadratic, which are fixed for now)
+          // TODO : allow tweaking ?
+          float kc = .001; // Avoid division by zero at close distances
+          float kl = 0.;
+          float kq = 1.;
+          attenuation /= (kc + kl * dist + kq * dist * dist);
+        }
         // We calculate diffuse and specular components
         // Diffuse Component
         float diffCoeff = max(dot(hit.n, lv), 0.f);

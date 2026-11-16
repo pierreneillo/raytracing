@@ -230,14 +230,13 @@ int main() {
   // The Cornell box is composed of a red wall on the left, a green wall on the
   // right, and 3 white walls on bottom, top and back
 
-  glm::mat4 transform =
-      glm::translate(glm::mat4(1.0f), glm::vec3(-.2, -.8, .3));
+  glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(-.2, -1, .1));
   transform =
-      glm::rotate(transform, (float)glm::radians(18.), glm::vec3(0, 1., 0));
-  transform = glm::scale(transform, glm::vec3(.2));
+      glm::rotate(transform, (float)glm::radians(70.), glm::vec3(0, 1., 0));
+  transform = glm::scale(transform, glm::vec3(.1));
 
   Object smallCube = Object(basicColoredMat(real3(1, 1, 1)),
-                            loadMesh("data/cube.obj", transform));
+                            loadMesh("data/bunny_big.obj", transform));
 
   transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.5, -.6, -.3));
   transform =
@@ -263,12 +262,10 @@ int main() {
       bigCube};
 
   // Temporary setup
-#define N_LIGHTS 1
+#define N_LIGHTS 2
   LightSource lights[N_LIGHTS] = {
-      {real3(0., 0.9, 0.), .5f, real3(1., 1., 1.), true},
-      // {real3(1.5, 1.5, 3.7), .5f, real3(1., 1., .8), true},
-      // {real3(2., 1.5, 0.), 1.f, real3(1., .8, .3), true},
-      // {real3(0., 1.12, 0.015), 1.f, real3(1., .8, .3), true},
+      {SUN, real3(0., -1, 0.), .1f, real3(1., 1., 1.)},
+      {POINT, real3(0., -.7, 1.3), .3f, real3(1., .7, .2)},
 
   };
 

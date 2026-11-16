@@ -12,7 +12,6 @@ struct Material {
   real3 specular;
   real kS;
   real shininess;
-  bool metallic;
   MaterialType type;
 };
 
@@ -65,11 +64,16 @@ struct Object {
   }
 };
 
+enum LightType { POINT, SUN };
+
 struct LightSource {
-  real3 pos;
+  LightType t;
+  union {
+    real3 pos; // Position or Point lights
+    real3 dir; // Direction in which the light emits for Sun lights
+  };
   float intensity;
   real3 color;
-  bool isActive;
 };
 
 struct RCamera {
